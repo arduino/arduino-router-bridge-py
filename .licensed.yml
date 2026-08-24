@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
+sources:
+  pip: true
+
+# Dedicated runtime-only venv: keeps dev tools in .venv out of compliance checks
+python:
+  virtual_env_dir: .venv-licensed
+
+# Licenses compatible with the repo's MPL-2.0 license
+allowed:
+  - mit
+  - apache-2.0
+  - bsd-2-clause
+  - bsd-3-clause
+  - isc
+  - mpl-2.0
+  - python-2.0
+  - psf-2.0
+  - unlicense
+  - cc0-1.0
+
+# Not runtime dependencies: the package itself and tooling
+ignored:
+  pip:
+    - arduino-app-bridge
+    - pip
+

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
@@ -30,7 +34,7 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/arduino/app-bricks-py"
+"Homepage" = "https://github.com/arduino/arduino-app-bridge"
 
 [tool.ruff]
 line-length = 120

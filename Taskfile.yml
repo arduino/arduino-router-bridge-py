@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
+version: "3"
+
+vars:
+  PYTHON: '{{.PYTHON | default "python3"}}'
+  VENV: .venv
+  LICENSED_VENV: .venv-licensed
+  COPYRIGHT: Arduino s.r.l. and/or its affiliated companies
+  # Directories and files that carry inline REUSE headers; the rest is covered by REUSE.toml
+  ANNOTATE_PATHS: src tests .github .licensed.yml pyproject.toml Taskfile.yml REUSE.toml
+
+env:
+  # licensed crashes on non-ASCII package metadata without a UTF-8 locale
+  LC_ALL: en_US.UTF-8
+
+tasks:
+  init:
+    desc: Create the development venv and install the package with dev dependencies
+    cmds:
+      - "{{.PYTHON}} -m venv {{.VENV}}"
+      - "{{.VENV}}/bin/pip install --upgrade pip"
+      - "{{.VENV}}/bin/pip install -e '.[dev]'"
+
+  test:
+    desc: Run the test suite (extra args are passed to pytest)
+    preconditions:
+      - sh: test -x {{.VENV}}/bin/pytest
+        msg: "Dev venv not initialized, run: task init"
+    cmds:
+      - "{{.VENV}}/bin/pytest {{.CLI_ARGS}}"
+
+  fmt:
+    desc: Apply ruff formatting
+    preconditions:
+      - sh: test -x {{.VENV}}/bin/ruff
+        msg: "Dev venv not initialized, run: task init"
+    cmds:
+      - "{{.VENV}}/bin/ruff format ."
+
+  fmt:check:
+    desc: Check ruff formatting without modifying files
+    preconditions:
+      - sh: test -x {{.VENV}}/bin/ruff
+        msg: "Dev venv not initialized, run: task init"
+    cmds:
+      - "{{.VENV}}/bin/ruff format --check ."
+
+  license:venv:
+    internal: true
+    cmds:
+      - "{{.PYTHON}} -m venv {{.LICENSED_VENV}}"
+      - "{{.LICENSED_VENV}}/bin/pip install --quiet ."
+
+  license:cache:
+    desc: Regenerate the licensed dependency cache and add missing REUSE headers
+    deps: [license:venv]
+    preconditions:
+      - sh: command -v licensed
+        msg: "licensed not found, install it with: brew install licensed"
+      - sh: command -v reuse
+        msg: "reuse not found, install it with: pipx install reuse"
+    cmds:
+      - licensed cache
+      - >-
+        reuse annotate --recursive --skip-unrecognized
+        --copyright-prefix spdx-string-c --copyright '{{.COPYRIGHT}}'
+        --exclude-year --license MPL-2.0 {{.ANNOTATE_PATHS}}
+
+  license:status:
+    desc: Check license compliance (licensed) and header compliance (reuse)
+    deps: [license:venv]
+    preconditions:
+      - sh: command -v licensed
+        msg: "licensed not found, install it with: brew install licensed"
+      - sh: command -v reuse
+        msg: "reuse not found, install it with: pipx install reuse"
+    cmds:
+      - licensed status
+      - reuse lint

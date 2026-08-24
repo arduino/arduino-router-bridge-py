@@ -12,6 +12,7 @@ MANIFEST
 
 # Virtual environments
 .venv/
+.venv-licensed/
 venv/
 env/
 
