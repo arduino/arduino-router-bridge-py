@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arduino-app-bridge"
+version = "0.1.0"
+authors = [
+  { name="Marco Colombo", email="m.colombo@arduino.cc" },
+  { name="Roberto Gazia", email="r.gazia@arduino.cc" },
+]
+description = "MessagePack-RPC bridge between Python apps and Arduino microcontrollers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MPL-2.0"
+license-files = ["LICENSE.txt"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "msgpack>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "pytest",
+    "ruff",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/arduino/app-bricks-py"
+
+[tool.ruff]
+line-length = 120
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["arduino.app_bridge*"]
