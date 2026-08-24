@@ -15,12 +15,12 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - uses: arduino/setup-task@v2
         with:
@@ -28,7 +28,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Initialize dev environment
-        run: task init PYTHON=python
+        run: task init
 
       - name: Run tests
         run: task test
@@ -38,17 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - uses: arduino/setup-task@v2
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Initialize dev environment
-        run: task init PYTHON=python
 
       - name: Check formatting
         run: task fmt:check
@@ -58,9 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - uses: arduino/setup-task@v2
         with:
@@ -72,8 +65,5 @@ jobs:
           version: "5.x"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install reuse
-        run: pipx install reuse
-
       - name: Check license and header compliance
-        run: task license:status PYTHON=python
+        run: task license:status

@@ -6,6 +6,14 @@ version = 1
 
 # Files where inline headers are impractical: docs, plain config, generated cache
 [[annotations]]
-path = ["README.md", ".gitignore", ".licenses/**"]
+path = [
+    "README.md",
+    "CHANGELOG.md",
+    ".gitignore",
+    ".licenses/**",
+    ".python-version",
+    "src/arduino/app_bridge/py.typed",
+    "uv.lock",
+]
 SPDX-FileCopyrightText = "Copyright (C) Arduino s.r.l. and/or its affiliated companies"
 SPDX-License-Identifier = "MPL-2.0"

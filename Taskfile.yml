@@ -5,8 +5,6 @@
 version: "3"
 
 vars:
-  PYTHON: '{{.PYTHON | default "python3"}}'
-  VENV: .venv
   LICENSED_VENV: .venv-licensed
   COPYRIGHT: Arduino s.r.l. and/or its affiliated companies
   # Directories and files that carry inline REUSE headers; the rest is covered by REUSE.toml
@@ -18,41 +16,48 @@ env:
 
 tasks:
   init:
-    desc: Create the development venv and install the package with dev dependencies
+    desc: Create the development venv from the lockfile (project + dev dependencies)
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found, install it with: brew install uv"
     cmds:
-      - "{{.PYTHON}} -m venv {{.VENV}}"
-      - "{{.VENV}}/bin/pip install --upgrade pip"
-      - "{{.VENV}}/bin/pip install -e '.[dev]'"
+      - uv sync
 
   test:
     desc: Run the test suite (extra args are passed to pytest)
     preconditions:
-      - sh: test -x {{.VENV}}/bin/pytest
-        msg: "Dev venv not initialized, run: task init"
+      - sh: command -v uv
+        msg: "uv not found, install it with: brew install uv"
     cmds:
-      - "{{.VENV}}/bin/pytest {{.CLI_ARGS}}"
+      - uv run --frozen pytest {{.CLI_ARGS}}
 
   fmt:
     desc: Apply ruff formatting
     preconditions:
-      - sh: test -x {{.VENV}}/bin/ruff
-        msg: "Dev venv not initialized, run: task init"
+      - sh: command -v uv
+        msg: "uv not found, install it with: brew install uv"
     cmds:
-      - "{{.VENV}}/bin/ruff format ."
+      - uv run --frozen ruff format .
 
   fmt:check:
     desc: Check ruff formatting without modifying files
     preconditions:
-      - sh: test -x {{.VENV}}/bin/ruff
-        msg: "Dev venv not initialized, run: task init"
+      - sh: command -v uv
+        msg: "uv not found, install it with: brew install uv"
     cmds:
-      - "{{.VENV}}/bin/ruff format --check ."
+      - uv run --frozen ruff format --check .
 
   license:venv:
     internal: true
+    env:
+      UV_PROJECT_ENVIRONMENT: "{{.LICENSED_VENV}}"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found, install it with: brew install uv"
     cmds:
-      - "{{.PYTHON}} -m venv {{.LICENSED_VENV}}"
-      - "{{.LICENSED_VENV}}/bin/pip install --quiet ."
+      - uv sync --frozen --no-dev
+      # licensed's pip source needs a pip executable inside the venv; uv venvs omit it
+      - uv pip install --python {{.LICENSED_VENV}} pip
 
   license:cache:
     desc: Regenerate the licensed dependency cache and add missing REUSE headers
@@ -60,12 +65,10 @@ tasks:
     preconditions:
       - sh: command -v licensed
         msg: "licensed not found, install it with: brew install licensed"
-      - sh: command -v reuse
-        msg: "reuse not found, install it with: pipx install reuse"
     cmds:
       - licensed cache
       - >-
-        reuse annotate --recursive --skip-unrecognized
+        uv run --frozen reuse annotate --recursive --skip-unrecognized
         --copyright-prefix spdx-string-c --copyright '{{.COPYRIGHT}}'
         --exclude-year --license MPL-2.0 {{.ANNOTATE_PATHS}}
 
@@ -75,8 +78,6 @@ tasks:
     preconditions:
       - sh: command -v licensed
         msg: "licensed not found, install it with: brew install licensed"
-      - sh: command -v reuse
-        msg: "reuse not found, install it with: pipx install reuse"
     cmds:
       - licensed status
-      - reuse lint
+      - uv run --frozen reuse lint
