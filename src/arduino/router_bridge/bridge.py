@@ -49,7 +49,7 @@ def set_address_resolver(resolver: callable):
 def set_logger(new_logger: logging.Logger):
     """Replaces the logger used by the library.
 
-    By default the library logs under the "arduino.app_bridge" namespace and emits
+    By default the library logs under the "arduino.router_bridge" namespace and emits
     nothing unless the application configures logging. Embedding frameworks can
     inject a pre-configured logger instead.
 

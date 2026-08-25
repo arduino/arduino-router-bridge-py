@@ -12,7 +12,7 @@ path = [
     ".gitignore",
     ".licenses/**",
     ".python-version",
-    "src/arduino/app_bridge/py.typed",
+    "src/arduino/router_bridge/py.typed",
     "uv.lock",
 ]
 SPDX-FileCopyrightText = "Copyright (C) Arduino s.r.l. and/or its affiliated companies"

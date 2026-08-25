@@ -9,14 +9,14 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
-from arduino.app_bridge.bridge import _ClientServer
+from arduino.router_bridge.bridge import _ClientServer
 
 
 class TestLifecycle(unittest.TestCase):
     """Lifecycle tests for the connection worker, using real threads."""
 
     def setUp(self):
-        self.logger_patcher = patch("arduino.app_bridge.bridge.logger", MagicMock())
+        self.logger_patcher = patch("arduino.router_bridge.bridge.logger", MagicMock())
         self.logger_patcher.start()
         self.addCleanup(self.logger_patcher.stop)
 

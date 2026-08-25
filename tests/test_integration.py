@@ -13,8 +13,8 @@ import queue
 
 from unittest.mock import MagicMock, patch
 
-from arduino.app_bridge.bridge import ClientServer
-from arduino.app_bridge.bridge import BUFFER_LIMIT_EXCEEDED_ERR
+from arduino.router_bridge.bridge import ClientServer
+from arduino.router_bridge.bridge import BUFFER_LIMIT_EXCEEDED_ERR
 
 
 class TestIntegration(unittest.TestCase):
@@ -31,7 +31,7 @@ class TestIntegration(unittest.TestCase):
 
         # Patch dependencies
         # Mock the logger used by ClientServer
-        logger_patcher = patch("arduino.app_bridge.bridge.logger", MagicMock())
+        logger_patcher = patch("arduino.router_bridge.bridge.logger", MagicMock())
         logger_patcher.start()
         self.addCleanup(logger_patcher.stop)
 
@@ -220,7 +220,7 @@ class TestIntegration(unittest.TestCase):
         self.server_thread.start()
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
-        with patch("arduino.app_bridge.bridge._reconnect_delay", 0):  # Speed up reconnection for the test
+        with patch("arduino.router_bridge.bridge._reconnect_delay", 0):  # Speed up reconnection for the test
             ClientServer(address=f"unix://{self.socket_path}")
 
             time_waited = 0

@@ -25,6 +25,6 @@ allowed:
 # Not runtime dependencies: the package itself and tooling
 ignored:
   pip:
-    - arduino-app-bridge
+    - arduino-router-bridge
     - pip
 

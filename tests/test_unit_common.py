@@ -5,7 +5,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from arduino.app_bridge.bridge import ClientServer
+from arduino.router_bridge.bridge import ClientServer
 
 
 class UnitTest(unittest.TestCase):
@@ -16,12 +16,12 @@ class UnitTest(unittest.TestCase):
         # Patch dependencies
         # Mock the logger used by ClientServer
         self.mock_logger = MagicMock()
-        self.logger_patcher = patch("arduino.app_bridge.bridge.logger", self.mock_logger)
+        self.logger_patcher = patch("arduino.router_bridge.bridge.logger", self.mock_logger)
         self.logger_patcher.start()
 
         # Mock the socket instance that will be created
         self.mock_socket_instance = MagicMock()
-        self.socket_patcher = patch("arduino.app_bridge.bridge.socket")
+        self.socket_patcher = patch("arduino.router_bridge.bridge.socket")
         self.mock_socket = self.socket_patcher.start()
         self.mock_socket.socket.return_value = self.mock_socket_instance
         self.mock_socket.create_connection.return_value = self.mock_socket_instance
@@ -29,7 +29,7 @@ class UnitTest(unittest.TestCase):
         # Mock only threading.Thread so the background read loop never runs.
         self.mock_thread_instance = MagicMock()
         self.thread_patcher = patch(
-            "arduino.app_bridge.bridge.threading.Thread", return_value=self.mock_thread_instance
+            "arduino.router_bridge.bridge.threading.Thread", return_value=self.mock_thread_instance
         )
         self.mock_thread = self.thread_patcher.start()
 

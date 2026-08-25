@@ -5,7 +5,7 @@
 from unittest.mock import MagicMock, patch
 import msgpack
 
-from arduino.app_bridge.bridge import ClientServer, GENERIC_ERR, set_address_resolver
+from arduino.router_bridge.bridge import ClientServer, GENERIC_ERR, set_address_resolver
 from test_unit_common import UnitTest
 
 
@@ -18,7 +18,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_address_resolver(self):
         """Test that an installed address resolver overrides the address used by new connections."""
-        with patch("arduino.app_bridge.bridge._address_resolver", None):  # Remove the resolver on exit
+        with patch("arduino.router_bridge.bridge._address_resolver", None):  # Remove the resolver on exit
             set_address_resolver(lambda address: "tcp://somehost:4321")
             client = ClientServer()
             self.assertEqual(client.socket_type, "tcp")
@@ -26,7 +26,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_address_resolver_receives_requested_address(self):
         """Test that the resolver is given the requested address, so it can pass it through."""
-        with patch("arduino.app_bridge.bridge._address_resolver", None):  # Remove the resolver on exit
+        with patch("arduino.router_bridge.bridge._address_resolver", None):  # Remove the resolver on exit
             set_address_resolver(lambda address: address)
             client = ClientServer(address="unix:///tmp/test.sock")
             self.assertEqual(client._peer_addr, "/tmp/test.sock")

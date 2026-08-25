@@ -4,7 +4,7 @@
 
 from unittest.mock import MagicMock
 
-from arduino.app_bridge.bridge import ClientServer, ROUTE_ALREADY_EXISTS_ERR, GENERIC_ERR
+from arduino.router_bridge.bridge import ClientServer, ROUTE_ALREADY_EXISTS_ERR, GENERIC_ERR
 from test_unit_common import UnitTest
 
 

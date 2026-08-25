@@ -12,4 +12,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MessagePack-RPC bridge between Python apps and Arduino microcontrollers:
   `Bridge` client/server, `@call`, `@notify` and `@provide` decorators.
 
-[Unreleased]: https://github.com/arduino/arduino-app-bridge/commits/main
+[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/commits/main
