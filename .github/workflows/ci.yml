@@ -60,10 +60,15 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: github/setup-licensed@v1
+      # github/setup-licensed cannot install licensed 5.x on current runners
+      # (system gem dir is read-only and no prebuilt executables exist), so
+      # install a user-writable Ruby and the gem directly
+      - uses: ruby/setup-ruby@v1
         with:
-          version: "5.x"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          ruby-version: "3.3"
+
+      - name: Install licensed
+        run: gem install licensed -v 5.1.0
 
       - name: Check license and header compliance
         run: task license:status
