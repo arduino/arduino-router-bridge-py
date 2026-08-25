@@ -22,7 +22,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v10.0.1
 
-      - uses: arduino/setup-task@v2
+      - uses: arduino/setup-task@v3
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -40,7 +40,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v10.0.1
 
-      - uses: arduino/setup-task@v2
+      - uses: arduino/setup-task@v3
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -55,7 +55,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v10.0.1
 
-      - uses: arduino/setup-task@v2
+      - uses: arduino/setup-task@v3
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
