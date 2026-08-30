@@ -1,8 +1,8 @@
 # Arduino Router Bridge
 
 A MessagePack-RPC bridge that lets Python applications call methods on an Arduino
-microcontroller, and expose Python functions the microcontroller can call back —
-over a Unix or TCP socket managed by the Arduino RPC router.
+microcontroller, and expose Python functions the microcontroller can call back.
+Requires a Unix or TCP socket managed by the [Arduino Router](https://github.com/arduino/arduino-router) and a compatible board such as the Arduino UNO Q or VENTUNO Q.
 
 ## Installation
 
