@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-31
+
 ### Added
 
 - Public `BridgeConnection` class for multi-instance use: independent connections with an explicit lifecycle, usable as a context manager.
@@ -57,5 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `arduino.router_bridge` logger namespace.
 - Type hints shipped with the package (`py.typed`).
 
-[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/arduino/arduino-router-bridge-py/releases/tag/v0.1.0
