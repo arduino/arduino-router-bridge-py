@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import msgpack
 
 from arduino.router_bridge import Bridge
-from arduino.router_bridge.connection import BUFFER_LIMIT_EXCEEDED_ERR
+from arduino.router_bridge.connection import BUFFER_LIMIT_EXCEEDED_ERR, GENERIC_ERR
 
 
 class TestIntegration(unittest.TestCase):
@@ -220,9 +220,9 @@ class TestIntegration(unittest.TestCase):
         except queue.Empty:
             self.fail("Server did not receive response for provided method.")
 
-    def test_handler_can_call_back_into_the_bridge(self):
-        """Tests that a provided handler can itself perform a bridge call: handlers must
-        run off the read thread, or the nested call's response could never be processed."""
+    def test_handler_nested_call_rejected_notify_allowed(self):
+        """Tests that a handler performing a nested bridge call fails with an error response
+        to the peer, while a handler sending notifications works."""
         server_ready = threading.Event()
         response_queue = queue.Queue()
 
@@ -245,21 +245,21 @@ class TestIntegration(unittest.TestCase):
                     for msg in unpacker:
                         return msg
 
-            # 1. Acknowledge the $/register call issued by provide()
-            register_msg = read_msg()
-            self.assertEqual(register_msg[2], "$/register")
-            conn.sendall(msgpack.packb([1, register_msg[1], None, None]))
+            # 1. Acknowledge the $/register calls issued by the two provide()
+            for _ in range(2):
+                register_msg = read_msg()
+                self.assertEqual(register_msg[2], "$/register")
+                conn.sendall(msgpack.packb([1, register_msg[1], None, None]))
 
             # 2. Call the provided "compound" method on the client
             conn.sendall(msgpack.packb([0, 7, "compound", [5]]))
 
-            # 3. The client handler calls "double" back on us: answer it
-            double_msg = read_msg()
-            self.assertEqual(double_msg[0], 0)
-            self.assertEqual(double_msg[2], "double")
-            conn.sendall(msgpack.packb([1, double_msg[1], None, double_msg[3][0] * 2]))
+            # 3. The nested call must never reach us: the next message is the error response
+            response_queue.put(read_msg())
 
-            # 4. Collect the client's response to the original "compound" request
+            # 4. The handler can notify us instead: call "worker" and collect notification plus response
+            conn.sendall(msgpack.packb([0, 9, "worker", [3]]))
+            response_queue.put(read_msg())
             response_queue.put(read_msg())
 
             self.stop_server.wait()
@@ -273,13 +273,26 @@ class TestIntegration(unittest.TestCase):
         client = self._connect_bridge()
         client.wait_connected(timeout=2)
 
+        def worker(x):
+            client.notify("progress", x)  # Notifications from handlers are allowed
+            return x * 2
+
         client.provide("compound", lambda x: client.call("double", x, timeout=5) + 1)
+        client.provide("worker", worker)
 
         try:
-            final_response = response_queue.get(timeout=5)
-            self.assertEqual(final_response, [1, 7, None, 11])  # double(5) + 1
+            error_response = response_queue.get(timeout=5)
+            self.assertEqual(error_response, [1, 7, [GENERIC_ERR, "Unhandled RuntimeError in handler"], None])
         except queue.Empty:
-            self.fail("Handler calling back into the bridge did not complete.")
+            self.fail("The nested call was not rejected with an error response.")
+
+        try:
+            notification = response_queue.get(timeout=5)
+            self.assertEqual(notification, [2, "progress", [3]])
+            final_response = response_queue.get(timeout=5)
+            self.assertEqual(final_response, [1, 9, None, 6])
+        except queue.Empty:
+            self.fail("Handler notifying the peer did not complete.")
 
     def test_reconnection(self):
         """Tests that the client automatically reconnects after the server disconnects it."""

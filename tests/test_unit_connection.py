@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import msgpack
@@ -179,6 +180,58 @@ class TestLockDiscipline(UnitTest):
             client.callbacks[1] = (None, None)
             client.callbacks[2] = (None, None)
             self.assertEqual(client._next_msgid_locked(), 3)
+
+
+class TestNestedCallGuard(UnitTest):
+    """Handlers run on the dispatcher thread and must not perform nested bridge calls."""
+
+    def test_call_from_dispatcher_thread_is_rejected(self):
+        client = self.make_engine()
+        client._send_bytes = MagicMock()
+        client._dispatch_thread = threading.current_thread()  # Stand in for the dispatcher thread
+
+        with self.assertRaises(RuntimeError) as cm:
+            client.call("nested_method")
+
+        self.assertIn("nested bridge calls are not supported", str(cm.exception))
+        client._send_bytes.assert_not_called()  # Rejected before anything reaches the wire
+        self.assertEqual(len(client.callbacks), 0)  # No pending entry leaks
+
+    def test_notify_from_dispatcher_thread_is_allowed(self):
+        client = self.make_engine()
+        client._send_bytes = MagicMock()
+        client._dispatch_thread = threading.current_thread()
+
+        client.notify("progress", 42)
+
+        client._send_bytes.assert_called_once()
+
+    def test_handler_nested_call_is_reported_to_peer(self):
+        """A handler attempting a nested call must fail and answer the request with an error."""
+        client = self.make_engine()
+        client._send_response = MagicMock()
+        client.handlers["nested"] = lambda: client.call("other_method")
+        client._dispatch_thread = threading.current_thread()  # drain_dispatch runs handlers on this thread
+
+        client._handle_msg([0, 5, "nested", []])
+        self.drain_dispatch(client)
+
+        client._send_response.assert_called_once_with(5, [GENERIC_ERR, "Unhandled RuntimeError in handler"], None)
+
+    def test_provide_from_dispatcher_thread_registers_in_background(self):
+        """provide() from a handler must not block on the registration call."""
+        client = self.make_engine()
+        client.call = MagicMock()
+        self.connect_client(client)
+        client._dispatch_thread = threading.current_thread()
+        self.mock_thread.reset_mock()
+
+        client.provide("from_handler", lambda: None)
+
+        self.assertIn("from_handler", client.handlers)
+        client.call.assert_not_called()  # Registration must not run inline on the dispatcher thread
+        _, thread_kwargs = self.mock_thread.call_args
+        self.assertEqual(thread_kwargs.get("name"), "Bridge.registration")
 
 
 class TestResourceLimits(UnitTest):

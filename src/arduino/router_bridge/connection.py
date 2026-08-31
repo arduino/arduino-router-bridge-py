@@ -177,7 +177,15 @@ class _BridgeEngine:
     def call(self, method_name: str, *params, timeout: float | None = 10):
         """Calls a method on the server and waits for a response.
         Waits indefinitely if timeout is None.
+        Raises RuntimeError when invoked from a provided handler: the peer may be blocked
+        waiting for the handler's own response, so nested calls risk deadlocks and request loops.
         """
+        if threading.current_thread() is self._dispatch_thread:
+            raise RuntimeError(
+                f"Cannot call '{method_name}' from a provided handler: nested bridge calls are not supported. "
+                "Use notify for fire-and-forget messages."
+            )
+
         resp_queue = queue.Queue(maxsize=1)
 
         def on_result(result):
@@ -241,10 +249,7 @@ class _BridgeEngine:
             self.handlers[method_name] = handler
 
         if self._is_connected_flag.is_set():
-            try:
-                self.call("$/register", method_name)
-            except Exception as e:
-                logger.error(f"Failed to register method '{method_name}' with the router: {e}")
+            self._register_with_router("$/register", method_name)
 
     def unprovide(self, method_name: str):
         """Makes a method no more available to the microcontroller."""
@@ -254,10 +259,23 @@ class _BridgeEngine:
             return  # Nothing to unregister
 
         if self._is_connected_flag.is_set():
+            self._register_with_router("$/unregister", method_name)
+
+    def _register_with_router(self, rpc_method: str, method_name: str):
+        """Sends a registration call for the method, logging failures. Runs it in a background
+        thread when invoked from a provided handler, since handlers must not block on calls.
+        """
+
+        def do_call():
             try:
-                self.call("$/unregister", method_name)
+                self.call(rpc_method, method_name)
             except Exception as e:
-                logger.error(f"Failed to unregister method '{method_name}' from the router: {e}")
+                logger.error(f"Failed to send '{rpc_method}' for method '{method_name}': {e}")
+
+        if threading.current_thread() is self._dispatch_thread:
+            threading.Thread(target=do_call, name="Bridge.registration", daemon=True).start()
+        else:
+            do_call()
 
     def _next_msgid_locked(self):
         """Returns the next message ID not in use by a pending request, within bounds.
@@ -269,8 +287,8 @@ class _BridgeEngine:
         return self.next_msgid
 
     def _dispatch_loop(self, dispatch_queue):
-        """Runs incoming request/notification handlers off the read thread, so slow or
-        re-entrant handlers (e.g. performing bridge calls) cannot stall message processing.
+        """Runs incoming request/notification handlers off the read thread, so slow
+        handlers cannot stall message processing.
         Exits when the stop sentinel (None) is received.
         """
         while True:
@@ -571,8 +589,10 @@ class Bridge:
     needs a process-wide bridge creates one instance and exposes it itself.
 
     Provided handlers run sequentially, in arrival order, on a dedicated dispatcher
-    thread: a handler may call back into the bridge (e.g. ``call``), but a slow
-    handler delays the handlers queued after it.
+    thread; a slow handler delays the handlers queued after it. A handler may send
+    notifications, but must not call back into the bridge with ``call``: the peer may
+    be blocked waiting for the handler's own response, so nested calls risk deadlocks
+    and request loops and are rejected with a RuntimeError.
 
     Examples:
         bridge = Bridge()
@@ -666,7 +686,8 @@ class Bridge:
             ValueError: If the method does not exist or the call fails.
             TimeoutError: If the call takes more time than the specified timeout.
             ConnectionError: If the connection drops or is stopped while waiting.
-            RuntimeError: If the call fails unexpectedly.
+            RuntimeError: If invoked from a provided handler (nested calls are not
+                supported), or if the call fails unexpectedly.
 
         Examples:
             temperature = bridge.call("get_temperature", "sensor1")
@@ -680,6 +701,9 @@ class Bridge:
         Registration is declarative: the handler is recorded immediately, registered
         with the router as soon as a connection is available, and re-registered
         transparently on every reconnection.
+
+        The handler may send notifications but must not call back into the bridge
+        with ``call``: nested calls are rejected with a RuntimeError (see ``call``).
 
         Args:
             method_name (str): The name under which the function should be provided to the microcontroller.

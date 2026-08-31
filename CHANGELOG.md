@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connecting no longer blocks: `connect()` returns immediately and the connection is established and retried in the background; `wait_connected()` waits for it when needed.
 - Invalid or incomplete router addresses are rejected with a `ValueError` at creation instead of retrying forever in the background.
 - `provide` registration is declarative: handlers are recorded immediately and registered with the router as soon as a connection is available, then re-registered on every reconnection. `provide`/`unprovide` no longer raise if the router is unreachable.
-- Provided handlers now run sequentially on a dedicated dispatcher thread instead of the read thread: a handler can call back into the bridge, and a slow handler no longer stalls response processing.
+- Provided handlers now run sequentially on a dedicated dispatcher thread instead of the read thread: a slow handler no longer stalls response processing.
+- Handlers may send notifications but must not call back into the bridge: nested calls from handlers are rejected with a `RuntimeError`, preventing deadlocks with a peer blocked on the handler's response and unbounded request loops.
 - `notify` is now truly fire-and-forget: when the router is disconnected it drops the notification immediately instead of blocking up to the reconnection delay.
 - `call(timeout=None)` now waits indefinitely as documented.
 

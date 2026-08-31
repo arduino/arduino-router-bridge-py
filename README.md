@@ -49,8 +49,10 @@ bridge.provide("get_country", get_country)
 
 Handlers can be provided before or after connecting: they are registered with the
 router as soon as the connection is available and re-registered transparently
-whenever it is re-established. Handlers run sequentially on a dedicated thread and
-may call back into the bridge.
+whenever it is re-established. Handlers run sequentially on a dedicated thread. A
+handler may send notifications, but must not call back into the bridge with
+`call()`: the peer may be blocked waiting for the handler's own response, so nested
+calls risk deadlocks and request loops and are rejected with a `RuntimeError`.
 
 ## Configuration
 
