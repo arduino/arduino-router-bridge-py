@@ -22,7 +22,7 @@ _reconnect_delay = 3.0  # seconds
 ROUTE_ALREADY_EXISTS_ERR = 0x05
 BUFFER_LIMIT_EXCEEDED_ERR = 0x06
 
-# Error codes for RPC messages sent to Arduino_RPClite. These are defined in the lib itself.
+# Error codes for RPC messages sent to Arduino_RouterBridge. These are defined in the lib itself.
 MALFORMED_CALL_ERR = 0xFD
 FUNCTION_NOT_FOUND_ERR = 0xFE
 GENERIC_ERR = 0xFF
@@ -176,13 +176,15 @@ class BridgeConnection:
         self.stop()
 
     def notify(self, method_name: str, *params):
-        """Sends a notification to the server without waiting for a response."""
+        """Sends a notification to the server without waiting for a response.
+        Best-effort: never blocks waiting for a connection, the notification is
+        dropped if the router is not connected.
+        """
         request = [2, method_name, params]
         try:
-            self._send_bytes(msgpack.packb(request))
+            self._send_bytes(msgpack.packb(request), wait_for_connection=False)
         except ConnectionError:
-            # Fire-and-forget semantics
-            pass
+            logger.debug(f"Dropped notification for method '{method_name}': not connected.")
         except Exception as e:
             logger.error(f"Failed to send notification for method '{method_name}': {e}")
 
@@ -541,17 +543,21 @@ class BridgeConnection:
         """Helper to pack and send a response message. err is None or an [err_code, err_msg] pair."""
         msg = [1, msgid, err, response]
         try:
-            self._send_bytes(msgpack.packb(msg))
+            # Don't wait for a reconnection: the requester's msgid belongs to the connection that carried it
+            self._send_bytes(msgpack.packb(msg), wait_for_connection=False)
         except ConnectionError:
             pass  # Response sending is best-effort if connection drops while handling request.
         except Exception as e:  # e.g., msgpack encoding error
             logger.error(f"Failed to pack/send response: {e}")
 
-    def _send_bytes(self, packed_data: bytes):
-        """Sends packed data, handling connection waits and errors."""
+    def _send_bytes(self, packed_data: bytes, wait_for_connection: bool = True):
+        """Sends packed data, handling connection waits and errors.
+        With wait_for_connection, a disconnected bridge is given a grace period to
+        reconnect before failing; otherwise it fails immediately.
+        """
         if not self._is_connected_flag.is_set():
             # Wait hoping for an auto-reconnection by _conn_manager
-            if not self._is_connected_flag.wait(timeout=_reconnect_delay):
+            if not wait_for_connection or not self._is_connected_flag.wait(timeout=_reconnect_delay):
                 raise ConnectionError("Not connected to router, send failed.")
 
         with self._conn_lock:

@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `provide` registration is declarative: handlers are recorded immediately and registered with the router as soon as a connection is available, then re-registered on every reconnection. `provide`/`unprovide` no longer raise if the router is unreachable.
 - `@call(timeout=None)` and `Bridge.call(timeout=None)` now wait indefinitely as documented.
 - Provided handlers now run sequentially on a dedicated dispatcher thread instead of the read thread: a handler can call back into the bridge, and a slow handler no longer stalls response processing.
+- `notify` is now truly fire-and-forget: when the router is disconnected it drops the notification immediately instead of blocking up to the reconnection delay.
 
 ### Removed
 

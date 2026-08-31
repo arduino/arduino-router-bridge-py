@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import time
 from unittest.mock import MagicMock
 
 import msgpack
@@ -63,7 +64,17 @@ class TestCoreFeatures(UnitTest):
         expected_request = [2, method_name, params]
         expected_packed_data = msgpack.packb(expected_request)
 
-        client._send_bytes.assert_called_once_with(expected_packed_data)
+        client._send_bytes.assert_called_once_with(expected_packed_data, wait_for_connection=False)
+
+    def test_notify_does_not_block_when_disconnected(self):
+        """Test that notify returns immediately and drops the message when the router is not connected."""
+        client = ClientServer()
+
+        start = time.monotonic()
+        client.notify("set_led", "green")  # Must not wait for a reconnection
+        self.assertLess(time.monotonic() - start, 0.5)
+
+        self.mock_socket_instance.sendall.assert_not_called()
 
     def test_call_successful(self):
         """Test a successful RPC call where a response is received."""

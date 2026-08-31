@@ -98,6 +98,8 @@ class Bridge:
     @staticmethod
     def notify(method_name: str, *params):
         """Sends a notification to the microcontroller without waiting for a response.
+        Best-effort: never blocks waiting for a connection, the notification is
+        dropped if the router is not connected.
 
         Args:
             method_name (str): The name of the method to notify on the microcontroller.
