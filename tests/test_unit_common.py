@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import queue
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -49,3 +50,13 @@ class UnitTest(unittest.TestCase):
         """Drives the mocked connection sequence so the client considers itself connected."""
         client._connect()
         self.assertTrue(client._is_connected_flag.is_set())
+
+    def drain_dispatch(self, client):
+        """Runs queued handler dispatches synchronously, standing in for the mocked dispatcher thread."""
+        while True:
+            try:
+                item = client._dispatch_queue.get_nowait()
+            except queue.Empty:
+                return
+            if item is not None:
+                client._run_handler(*item)

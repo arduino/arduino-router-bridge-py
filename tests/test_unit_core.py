@@ -35,7 +35,7 @@ class TestCoreFeatures(UnitTest):
         client = ClientServer(address="tcp://localhost:1234")
         self.assertEqual(client.socket_type, "tcp")
         self.assertEqual(client._peer_addr, ("localhost", 1234))
-        self.mock_thread_instance.start.assert_called_once()  # start() spawns the background loop
+        self.assertEqual(self.mock_thread_instance.start.call_count, 2)  # start() spawns read loop and dispatcher
 
         self.connect_client(client)
         self.mock_socket.create_connection.assert_called_with(("localhost", 1234), timeout=5)
@@ -45,7 +45,7 @@ class TestCoreFeatures(UnitTest):
         client = ClientServer(address="unix:///tmp/test.sock")
         self.assertEqual(client.socket_type, "unix")
         self.assertEqual(client._peer_addr, "/tmp/test.sock")
-        self.mock_thread_instance.start.assert_called_once()  # start() spawns the background loop
+        self.assertEqual(self.mock_thread_instance.start.call_count, 2)  # start() spawns read loop and dispatcher
 
         self.connect_client(client)
         self.mock_socket.socket.assert_called_with(self.mock_socket.AF_UNIX, self.mock_socket.SOCK_STREAM)

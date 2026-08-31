@@ -86,6 +86,7 @@ class TestHandleMsg(UnitTest):
         request_msg = [0, msgid, method_name.encode(), params]  # Method name as bytes
 
         client._handle_msg(request_msg)
+        self.drain_dispatch(client)  # Handlers run on the dispatcher thread, mocked in setUp
 
         handler_mock.assert_called_once_with(*params)
         client._send_response.assert_called_once_with(msgid, None, "handled")
@@ -99,6 +100,7 @@ class TestHandleMsg(UnitTest):
         client.handlers["failing_method"] = MagicMock(side_effect=ValueError("Handler failed"))
 
         client._handle_msg(request_msg)
+        self.drain_dispatch(client)
 
         client._send_response.assert_called_once()
         args, _ = client._send_response.call_args
@@ -134,6 +136,7 @@ class TestHandleMsg(UnitTest):
         notification_msg = [2, method_name, params]
 
         client._handle_msg(notification_msg)
+        self.drain_dispatch(client)
 
         handler_mock.assert_called_once_with(*params)
         client._send_response.assert_not_called()  # Notifications don't get responses

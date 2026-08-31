@@ -103,6 +103,83 @@ class TestConnection(UnitTest):
         self.assertEqual(flag_when_closed, [False])
 
 
+class TestLockDiscipline(UnitTest):
+    """Blocking I/O must never happen while holding the internal locks."""
+
+    def test_sendall_runs_without_holding_conn_lock(self):
+        """_send_bytes must not hold _conn_lock during sendall, so stop() can always shut the socket down."""
+        client = ClientServer()
+        self.connect_client(client)
+
+        conn_lock_free = []
+
+        def sendall(data):
+            acquired = client._conn_lock.acquire(blocking=False)
+            if acquired:
+                client._conn_lock.release()
+            conn_lock_free.append(acquired)
+
+        client._conn.sendall.side_effect = sendall
+        client._send_bytes(b"payload")
+
+        self.assertEqual(conn_lock_free, [True])
+
+    def test_cancel_request_sent_without_holding_callbacks_lock(self):
+        """The timeout path must send $/cancelRequest outside callbacks_lock."""
+        client = ClientServer()
+        client._send_bytes = MagicMock()
+
+        callbacks_lock_free = []
+
+        def notify(method_name, *params):
+            acquired = client.callbacks_lock.acquire(blocking=False)
+            if acquired:
+                client.callbacks_lock.release()
+            callbacks_lock_free.append(acquired)
+
+        client.notify = MagicMock(side_effect=notify)
+
+        with self.assertRaises(TimeoutError):
+            client.call("slow_method", timeout=0.1)
+
+        client.notify.assert_called_once_with("$/cancelRequest", client.next_msgid)
+        self.assertEqual(callbacks_lock_free, [True])
+
+    def test_registration_on_connect_runs_without_holding_handlers_lock(self):
+        """Re-registration must not hold handlers_lock across blocking $/register calls."""
+        client = ClientServer()
+
+        handlers_lock_free = []
+
+        def call(method_name, *params, **kwargs):
+            acquired = client.handlers_lock.acquire(blocking=False)
+            if acquired:
+                client.handlers_lock.release()
+            handlers_lock_free.append(acquired)
+
+        client.call = MagicMock(side_effect=call)
+        client.provide("handler_a", lambda: None)
+        client.provide("handler_b", lambda: None)
+
+        def run_target_synchronously(target, *args, **kwargs):
+            target()
+            return self.mock_thread_instance
+
+        with patch("arduino.router_bridge.connection.threading.Thread", side_effect=run_target_synchronously):
+            client._connect()
+
+        self.assertEqual(handlers_lock_free, [True, True])
+
+    def test_msgid_reservation_skips_pending_ids(self):
+        """Message IDs of pending requests must never be reused."""
+        client = ClientServer()
+        client.next_msgid = 0
+        with client.callbacks_lock:
+            client.callbacks[1] = (None, None)
+            client.callbacks[2] = (None, None)
+            self.assertEqual(client._next_msgid_locked(), 3)
+
+
 class TestIsConnected(UnitTest):
     def test_no_connection_object(self):
         """_is_connected must be False when there is no connection object."""

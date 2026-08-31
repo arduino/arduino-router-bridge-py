@@ -213,6 +213,67 @@ class TestIntegration(unittest.TestCase):
         except queue.Empty:
             self.fail("Server did not receive response for provided method.")
 
+    def test_handler_can_call_back_into_the_bridge(self):
+        """Tests that a provided handler can itself perform a bridge call: handlers must
+        run off the read thread, or the nested call's response could never be processed."""
+        server_ready = threading.Event()
+        response_queue = queue.Queue()
+
+        def server_logic():
+            server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_sock.bind(self.socket_path)
+            server_sock.listen(1)
+            server_ready.set()
+            conn, _ = server_sock.accept()
+            unpacker = msgpack.Unpacker(raw=False)
+
+            def read_msg():
+                for msg in unpacker:
+                    return msg
+                while True:
+                    data = conn.recv(4096)
+                    if not data:
+                        raise ConnectionError("Client disconnected")
+                    unpacker.feed(data)
+                    for msg in unpacker:
+                        return msg
+
+            # 1. Acknowledge the $/register call issued by provide()
+            register_msg = read_msg()
+            self.assertEqual(register_msg[2], "$/register")
+            conn.sendall(msgpack.packb([1, register_msg[1], None, None]))
+
+            # 2. Call the provided "compound" method on the client
+            conn.sendall(msgpack.packb([0, 7, "compound", [5]]))
+
+            # 3. The client handler calls "double" back on us: answer it
+            double_msg = read_msg()
+            self.assertEqual(double_msg[0], 0)
+            self.assertEqual(double_msg[2], "double")
+            conn.sendall(msgpack.packb([1, double_msg[1], None, double_msg[3][0] * 2]))
+
+            # 4. Collect the client's response to the original "compound" request
+            response_queue.put(read_msg())
+
+            self.stop_server.wait()
+            conn.close()
+            server_sock.close()
+
+        self.server_thread = threading.Thread(target=server_logic, daemon=True)
+        self.server_thread.start()
+        self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
+
+        client = ClientServer(address=f"unix://{self.socket_path}")
+        client.wait_connected(timeout=2)
+
+        client.provide("compound", lambda x: client.call("double", x, timeout=5) + 1)
+
+        try:
+            final_response = response_queue.get(timeout=5)
+            self.assertEqual(final_response, [1, 7, None, 11])  # double(5) + 1
+        except queue.Empty:
+            self.fail("Handler calling back into the bridge did not complete.")
+
     def test_reconnection(self):
         """Tests that the client automatically reconnects after the server disconnects it."""
         connections = []
