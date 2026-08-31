@@ -4,8 +4,9 @@
 
 from unittest.mock import MagicMock, patch
 
-from arduino.router_bridge.bridge import ClientServer
 from test_unit_common import UnitTest
+
+from arduino.router_bridge.bridge import ClientServer
 
 
 class TestConnection(UnitTest):
@@ -15,6 +16,7 @@ class TestConnection(UnitTest):
         # The setUp method already mocks the main _conn_manager thread, so it won't run and cause errors.
         client = ClientServer()
         client.call = MagicMock()
+        self.connect_client(client)
 
         handler = lambda: "test"
         method_name = "my_handler"
@@ -26,6 +28,7 @@ class TestConnection(UnitTest):
 
         # 2. Simulate connection loss
         client._is_connected_flag.clear()
+        client._conn = None
 
         # 3. Trigger the reconnection logic.
         # We need to patch the threading.Thread to run the target function synchronously (register_methods_on_reconnect).
@@ -33,8 +36,25 @@ class TestConnection(UnitTest):
             target()  # run the register_methods_on_reconnect function
             return self.mock_thread_instance
 
-        with patch("arduino.router_bridge.bridge.threading.Thread", side_effect=run_target_synchronously):
+        with patch("arduino.router_bridge.connection.threading.Thread", side_effect=run_target_synchronously):
             client._connect()
 
         # 4. Verify that the handler was re-registered
         client.call.assert_called_once_with("$/register", method_name)
+
+    def test_deferred_registration_happens_on_first_connection(self):
+        """Tests that handlers provided while disconnected are registered on the first connection."""
+        client = ClientServer()
+        client.call = MagicMock()
+
+        client.provide("early_handler", lambda: "test")
+        client.call.assert_not_called()  # Not connected yet
+
+        def run_target_synchronously(target, *args, **kwargs):
+            target()
+            return self.mock_thread_instance
+
+        with patch("arduino.router_bridge.connection.threading.Thread", side_effect=run_target_synchronously):
+            client._connect()
+
+        client.call.assert_called_once_with("$/register", "early_handler")

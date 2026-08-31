@@ -66,19 +66,35 @@ The bridge connects to the Arduino RPC router at `unix:///var/run/arduino-router
 by default. Pass an `address` to the decorators to connect elsewhere; both
 `unix://<path>` and `tcp://<host>:<port>` addresses are supported.
 
-Embedding frameworks can install a resolver that maps the requested address to the
-effective one whenever a connection is created:
+Embedding frameworks can bind the address used when none is given explicitly, once
+at startup and before application code runs:
 
 ```python
 import os
 
-from arduino.router_bridge import set_address_resolver
+from arduino.router_bridge import Bridge
 
-set_address_resolver(lambda address: os.environ.get("APP_SOCKET", address))
+Bridge.connect(os.environ["APP_SOCKET"])
 ```
 
-The connection is a process-wide singleton with automatic reconnection: provided
-methods are re-registered transparently whenever the connection is re-established.
+`Bridge`, the decorators and `ClientServer` share one process-wide connection per
+address, established lazily in the background and reconnected automatically:
+provided methods are registered as soon as the connection is available and
+re-registered transparently whenever it is re-established. Call `shutdown()` to
+stop the shared connections, for example on application exit.
+
+### Multiple routers
+
+Applications that need full control over the connection lifecycle, or independent
+connections to several routers, can use `BridgeConnection` directly:
+
+```python
+from arduino.router_bridge import BridgeConnection
+
+with BridgeConnection("tcp://192.168.1.10:5000") as conn:
+    conn.wait_connected(timeout=5)
+    conn.call("get_temperature", "sensor1")
+```
 
 ## Logging
 
@@ -90,14 +106,6 @@ configures a handler:
 import logging
 
 logging.getLogger("arduino.router_bridge").addHandler(logging.StreamHandler())
-```
-
-Embedding frameworks can also inject a pre-configured logger:
-
-```python
-from arduino.router_bridge import set_logger
-
-set_logger(my_logger)
 ```
 
 ## License

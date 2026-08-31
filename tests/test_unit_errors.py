@@ -4,8 +4,9 @@
 
 from unittest.mock import MagicMock
 
-from arduino.router_bridge.bridge import ClientServer, GENERIC_ERR, BUFFER_LIMIT_EXCEEDED_ERR
 from test_unit_common import UnitTest
+
+from arduino.router_bridge import BUFFER_LIMIT_EXCEEDED_ERR, GENERIC_ERR, ClientServer
 
 
 class TestErrors(UnitTest):

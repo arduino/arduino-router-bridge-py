@@ -7,12 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Public `BridgeConnection` class for multi-instance use: independent connections with an explicit lifecycle, usable as a context manager.
+- `Bridge.connect(address)` to bind the address used by `Bridge` and the decorators when none is given explicitly; embedding runtimes should call it once at startup.
+- `wait_connected()` to wait for the connection to be established.
+- `shutdown()` to stop the process-wide shared connections.
+- `DEFAULT_ADDRESS` constant with the default router address.
+- Invalid or incomplete router addresses are rejected with a `ValueError` at creation instead of retrying forever in the background.
+
+### Changed
+
+- `Bridge`, the decorators and `ClientServer` now share one connection per address: the `address` argument selects the shared connection instead of being silently ignored after the first use. `ClientServer` is now a factory function returning the shared `BridgeConnection`.
+- Connecting no longer blocks: `start()` returns immediately and the connection is established and retried in the background. Decorating with `@notify`/`@call` no longer opens a connection at import time.
+- `provide` registration is declarative: handlers are recorded immediately and registered with the router as soon as a connection is available, then re-registered on every reconnection. `provide`/`unprovide` no longer raise if the router is unreachable.
+- `@call(timeout=None)` and `Bridge.call(timeout=None)` now wait indefinitely as documented.
+
+### Removed
+
+- `set_address_resolver`: bind the default address directly with `Bridge.connect(address)` instead; explicit `address` arguments are no longer remapped.
+- `set_logger`: attach a handler or set a level on the `arduino.router_bridge` logger namespace instead.
+
 ## [0.1.0] - 2026-08-31
 
 ### Added
 
-- MessagePack-RPC bridge between Python apps and Arduino microcontrollers:
-  `Bridge` client/server, `@call`, `@notify` and `@provide` decorators.
+- MessagePack-RPC bridge between Python apps and Arduino microcontrollers: `Bridge` client/server, `@call`, `@notify` and `@provide` decorators.
 - Configurable router address resolution via `set_address_resolver`.
 - Pluggable logging via `set_logger`; silent by default under the
   `arduino.router_bridge` logger namespace.

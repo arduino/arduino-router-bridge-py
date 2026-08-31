@@ -7,26 +7,30 @@ import logging
 from .bridge import (
     Bridge,
     ClientServer,
-    notify,
     call,
+    notify,
     provide,
-    set_address_resolver,
-    set_logger,
-    ROUTE_ALREADY_EXISTS_ERR,
+    shutdown,
+)
+from .connection import (
     BUFFER_LIMIT_EXCEEDED_ERR,
-    MALFORMED_CALL_ERR,
+    DEFAULT_ADDRESS,
     FUNCTION_NOT_FOUND_ERR,
     GENERIC_ERR,
+    MALFORMED_CALL_ERR,
+    ROUTE_ALREADY_EXISTS_ERR,
+    BridgeConnection,
 )
 
 __all__ = [
     "Bridge",
+    "BridgeConnection",
     "ClientServer",
+    "DEFAULT_ADDRESS",
     "notify",
     "call",
     "provide",
-    "set_address_resolver",
-    "set_logger",
+    "shutdown",
     "ROUTE_ALREADY_EXISTS_ERR",
     "BUFFER_LIMIT_EXCEEDED_ERR",
     "MALFORMED_CALL_ERR",
