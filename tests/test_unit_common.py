@@ -6,17 +6,16 @@ import queue
 import unittest
 from unittest.mock import MagicMock, patch
 
-from arduino.router_bridge import bridge as bridge_module
+from arduino.router_bridge import DEFAULT_ADDRESS, Bridge
 
 
 class UnitTest(unittest.TestCase):
     def setUp(self):
-        """This method is called before each test to reset the shared instances and patch the dependencies."""
-        bridge_module._instances.clear()
-        bridge_module._default_address = bridge_module.DEFAULT_ADDRESS
+        """This method is called before each test to patch the engine dependencies."""
+        self.bridges = []  # Keeps handles alive so GC finalizers don't stop engines mid-test
 
         # Patch dependencies
-        # Mock the logger used by BridgeConnection
+        # Mock the logger used by the engine
         self.mock_logger = MagicMock()
         self.logger_patcher = patch("arduino.router_bridge.connection.logger", self.mock_logger)
         self.logger_patcher.start()
@@ -28,7 +27,7 @@ class UnitTest(unittest.TestCase):
         self.mock_socket.socket.return_value = self.mock_socket_instance
         self.mock_socket.create_connection.return_value = self.mock_socket_instance
 
-        # Mock only threading.Thread so the background read loop never runs.
+        # Mock only threading.Thread so the background loops never run.
         self.mock_thread_instance = MagicMock()
         self.thread_patcher = patch(
             "arduino.router_bridge.connection.threading.Thread", return_value=self.mock_thread_instance
@@ -37,17 +36,23 @@ class UnitTest(unittest.TestCase):
 
     def tearDown(self):
         """This method is called after each test and cleans up the patched dependencies."""
-        for instance in bridge_module._instances.values():
-            instance.stop()
-        bridge_module._instances.clear()
-        bridge_module._default_address = bridge_module.DEFAULT_ADDRESS
+        for bridge in self.bridges:
+            bridge.disconnect()
+        self.bridges.clear()
 
         self.thread_patcher.stop()
         self.socket_patcher.stop()
         self.logger_patcher.stop()
 
+    def make_engine(self, address=DEFAULT_ADDRESS, **kwargs):
+        """Creates a started engine, keeping its public handle alive for the test duration."""
+        bridge = Bridge(address, **kwargs)
+        bridge.connect()
+        self.bridges.append(bridge)
+        return bridge._engine
+
     def connect_client(self, client):
-        """Drives the mocked connection sequence so the client considers itself connected."""
+        """Drives the mocked connection sequence so the engine considers itself connected."""
         client._connect()
         self.assertTrue(client._is_connected_flag.is_set())
 

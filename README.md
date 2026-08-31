@@ -12,89 +12,68 @@ pip install arduino-router-bridge
 
 ## Usage
 
-### Calling the microcontroller
+Create a `Bridge`, connect it, and use it for as long as you need:
 
 ```python
 from arduino.router_bridge import Bridge
 
+bridge = Bridge()
+bridge.connect()  # Returns immediately, connects in the background
+bridge.wait_connected(timeout=5)  # Optional
+
 # Fire-and-forget notification
-Bridge.notify("set_led", "green", True)
+bridge.notify("set_led", "green", True)
 
 # Blocking call with response
-temperature = Bridge.call("get_temperature", "sensor1", timeout=5)
+temperature = bridge.call("get_temperature", "sensor1", timeout=5)
+
+bridge.disconnect()
+```
+
+It can also be used as a context manager:
+
+```python
+with Bridge() as bridge:
+    bridge.call("get_temperature", "sensor1")
 ```
 
 ### Exposing Python functions to the microcontroller
 
 ```python
-from arduino.router_bridge import Bridge
-
-
 def get_country(lon: str, lat: str) -> str:
     return lookup_country(lon, lat)
 
 
-Bridge.provide("get_country", get_country)
+bridge.provide("get_country", get_country)
 ```
 
-### Decorator API
-
-```python
-from arduino.router_bridge import notify, call, provide
-
-
-@call("math.add", timeout=3)
-def add(a: int, b: int) -> int: ...  # Body is not needed
-
-
-@notify()
-def set_led(color: str, status: bool): ...
-
-
-@provide()
-def get_status() -> str:
-    return "ok"
-
-
-result = add(1, 2)  # Sends the "math.add" RPC call and returns its response
-set_led("green", True)  # Sends the "set_led" RPC notification
-```
+Handlers can be provided before or after connecting: they are registered with the
+router as soon as the connection is available and re-registered transparently
+whenever it is re-established. Handlers run sequentially on a dedicated thread and
+may call back into the bridge.
 
 ## Configuration
 
 The bridge connects to the Arduino RPC router at `unix:///var/run/arduino-router.sock`
-by default. Pass an `address` to the decorators to connect elsewhere; both
+by default. Pass an `address` to the constructor to connect elsewhere; both
 `unix://<path>` and `tcp://<host>:<port>` addresses are supported.
 
-Embedding frameworks can bind the address used when none is given explicitly, once
-at startup and before application code runs:
+Instances are independent: create one per router you need to talk to. How an
+instance is shared is the caller's concern; an embedding runtime that needs a
+process-wide bridge creates one instance at startup and exposes it itself:
 
 ```python
 import os
 
 from arduino.router_bridge import Bridge
 
-Bridge.connect(os.environ["APP_SOCKET"])
+bridge = Bridge(os.environ["APP_SOCKET"])
+bridge.connect()
 ```
 
-`Bridge` and the decorators share one process-wide connection per address,
-established lazily in the background and reconnected automatically:
-provided methods are registered as soon as the connection is available and
-re-registered transparently whenever it is re-established. Call `shutdown()` to
-stop the shared connections, for example on application exit.
-
-### Multiple routers
-
-Applications that need full control over the connection lifecycle, or independent
-connections to several routers, can use `BridgeConnection` directly:
-
-```python
-from arduino.router_bridge import BridgeConnection
-
-with BridgeConnection("tcp://192.168.1.10:5000") as conn:
-    conn.wait_connected(timeout=5)
-    conn.call("get_temperature", "sensor1")
-```
+Connections are established lazily in the background and reconnected
+automatically. Disconnect explicitly (or use a context manager) when done; as a
+safety net, a garbage-collected bridge disconnects automatically.
 
 ## Security model
 
@@ -107,7 +86,7 @@ network, and never expose them to untrusted hosts.
 Handler exceptions are reported to the caller by exception type only; full details,
 including the traceback, stay in the local log. To bound memory usage, incoming
 messages are capped at 1 MiB and pending handler executions at 1024 by default;
-both limits are configurable per `BridgeConnection`.
+both limits are configurable per `Bridge`.
 
 ## Logging
 

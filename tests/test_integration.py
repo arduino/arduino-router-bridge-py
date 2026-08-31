@@ -13,17 +13,14 @@ from unittest.mock import MagicMock, patch
 
 import msgpack
 
-from arduino.router_bridge import shutdown
-from arduino.router_bridge.bridge import ClientServer
+from arduino.router_bridge import Bridge
 from arduino.router_bridge.connection import BUFFER_LIMIT_EXCEEDED_ERR
 
 
 class TestIntegration(unittest.TestCase):
     def setUp(self):
-        """Set up for each test. Resets the singleton and creates a temporary
-        directory for the Unix socket.
-        """
-        shutdown()  # Forget any shared connection left over from other tests
+        """Set up for each test: creates a temporary directory for the Unix socket."""
+        self.bridges = []  # Bridges created by the test, disconnected in tearDown
 
         self.tmpdir = tempfile.TemporaryDirectory()
         self.socket_path = os.path.join(self.tmpdir.name, "test.sock")
@@ -31,7 +28,7 @@ class TestIntegration(unittest.TestCase):
         self.server_thread = None
 
         # Patch dependencies
-        # Mock the logger used by ClientServer
+        # Mock the logger used by the bridge
         logger_patcher = patch("arduino.router_bridge.connection.logger", MagicMock())
         logger_patcher.start()
         self.addCleanup(logger_patcher.stop)
@@ -53,12 +50,20 @@ class TestIntegration(unittest.TestCase):
         if self.server_thread:
             self.server_thread.join(timeout=2)
 
-        shutdown()  # Stop all shared connections created by the test
+        for bridge in self.bridges:
+            bridge.disconnect()
 
         self.tmpdir.cleanup()
 
+    def _connect_bridge(self):
+        """Creates a bridge to the test socket, connects it and registers it for teardown."""
+        bridge = Bridge(f"unix://{self.socket_path}")
+        self.bridges.append(bridge)
+        bridge.connect()
+        return bridge
+
     def test_notify(self):
-        """Tests that ClientServer.notify correctly sends a message to the server."""
+        """Tests that Bridge.notify correctly sends a message to the server."""
         server_ready = threading.Event()
         received_queue = queue.Queue()
 
@@ -83,7 +88,7 @@ class TestIntegration(unittest.TestCase):
         self.server_thread.start()
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
-        client = ClientServer(address=f"unix://{self.socket_path}")
+        client = self._connect_bridge()
         client.wait_connected(timeout=2)
 
         client.notify("test_method", "hello", 123)
@@ -95,7 +100,7 @@ class TestIntegration(unittest.TestCase):
             self.fail("Server did not receive notify message in time.")
 
     def test_call(self):
-        """Tests that ClientServer.call correctly sends a request and receives a response."""
+        """Tests that Bridge.call correctly sends a request and receives a response."""
         server_ready = threading.Event()
 
         def server_logic():
@@ -123,7 +128,7 @@ class TestIntegration(unittest.TestCase):
         self.server_thread.start()
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
-        client = ClientServer(address=f"unix://{self.socket_path}")
+        client = self._connect_bridge()
         client.wait_connected(timeout=2)
 
         result = client.call("get_value")
@@ -148,14 +153,14 @@ class TestIntegration(unittest.TestCase):
         self.server_thread.start()
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
-        client = ClientServer(address=f"unix://{self.socket_path}")
+        client = self._connect_bridge()
         client.wait_connected(timeout=2)
 
         with self.assertRaises(ConnectionError):
             client.call("some_method", timeout=5)
 
     def test_provide(self):
-        """Tests that ClientServer.provide makes a function callable by the server."""
+        """Tests that Bridge.provide makes a function callable by the server."""
         server_ready = threading.Event()
         response_queue = queue.Queue()
 
@@ -200,7 +205,7 @@ class TestIntegration(unittest.TestCase):
         self.server_thread.start()
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
-        client = ClientServer(address=f"unix://{self.socket_path}")
+        client = self._connect_bridge()
         client.wait_connected(timeout=2)
 
         client.provide("add", lambda a, b: a + b)
@@ -265,7 +270,7 @@ class TestIntegration(unittest.TestCase):
         self.server_thread.start()
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
-        client = ClientServer(address=f"unix://{self.socket_path}")
+        client = self._connect_bridge()
         client.wait_connected(timeout=2)
 
         client.provide("compound", lambda x: client.call("double", x, timeout=5) + 1)
@@ -305,7 +310,7 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
         with patch("arduino.router_bridge.connection._reconnect_delay", 0):  # Speed up reconnection for the test
-            ClientServer(address=f"unix://{self.socket_path}")
+            self._connect_bridge()
 
             time_waited = 0
             while len(connections) < 2 and time_waited < 5:
@@ -315,7 +320,7 @@ class TestIntegration(unittest.TestCase):
             self.assertEqual(len(connections), 2, "Client did not reconnect in time")
 
     def test_router_returns_buffer_limit_error(self):
-        """Simulate router rejecting a request due to buffer limit and verify ClientServer propagates the error."""
+        """Simulate router rejecting a request due to buffer limit and verify the bridge propagates the error."""
         server_ready = threading.Event()
 
         def server_logic():
@@ -341,7 +346,7 @@ class TestIntegration(unittest.TestCase):
         self.server_thread.start()
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
-        client = ClientServer(address=f"unix://{self.socket_path}")
+        client = self._connect_bridge()
         client.wait_connected(timeout=2)
 
         with self.assertRaises(ValueError) as cm:

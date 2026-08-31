@@ -6,14 +6,13 @@ from unittest.mock import MagicMock
 
 from test_unit_common import UnitTest
 
-from arduino.router_bridge.bridge import ClientServer
 from arduino.router_bridge.connection import BUFFER_LIMIT_EXCEEDED_ERR, GENERIC_ERR
 
 
 class TestErrors(UnitTest):
     def test_connection_lost(self):
         """Test that pending callbacks fail and are cleaned up when connection is lost."""
-        client = ClientServer()
+        client = self.make_engine()
 
         on_error_1 = MagicMock()
         on_error_2 = MagicMock()
@@ -30,7 +29,7 @@ class TestErrors(UnitTest):
 
     def test_call_pending_during_connection_loss_raises_connection_error(self):
         """Test that a call pending while the connection drops raises a ConnectionError."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         def side_effect(*args, **kwargs):
@@ -47,7 +46,7 @@ class TestErrors(UnitTest):
 
     def test_call_pending_during_stop_raises_connection_error(self):
         """Test that a call pending while the bridge is stopped raises a ConnectionError."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         def side_effect(*args, **kwargs):
@@ -62,7 +61,7 @@ class TestErrors(UnitTest):
 
     def test_call_timeout(self):
         """Test that an RPC call raises a TimeoutError if no response is received."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()  # Don't simulate a response
 
         with self.assertRaises(TimeoutError):
@@ -70,7 +69,7 @@ class TestErrors(UnitTest):
 
     def test_call_server_error(self):
         """Test an RPC call that returns an error from the server."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         method_name = "test_error"
@@ -90,13 +89,13 @@ class TestErrors(UnitTest):
 
     def test_provide_error(self):
         """Test that providing a non-callable handler raises a ValueError."""
-        client = ClientServer()
+        client = self.make_engine()
         with self.assertRaises(ValueError):
             client.provide("bad_handler", "not a function")
 
     def test_clear_callbacks_after_connection_lost(self):
         """Test that pending callbacks are correctly failed when the connection is lost."""
-        client = ClientServer()
+        client = self.make_engine()
 
         on_error_1 = MagicMock()
         on_error_2 = MagicMock()
@@ -113,7 +112,7 @@ class TestErrors(UnitTest):
 
     def test_buffer_limit_error_propagates(self):
         """Test that a BUFFER_LIMIT_EXCEEDED_ERR response is propagated to the registered callback."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         method_name = "test_buffer_limit"

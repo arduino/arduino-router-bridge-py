@@ -4,25 +4,13 @@
 
 import logging
 
-from .bridge import (
-    Bridge,
-    call,
-    notify,
-    provide,
-    shutdown,
-)
 from .connection import (
     DEFAULT_ADDRESS,
-    BridgeConnection,
+    Bridge,
 )
 
 __all__ = [
     "Bridge",
-    "notify",
-    "call",
-    "provide",
-    "shutdown",
-    "BridgeConnection",
     "DEFAULT_ADDRESS",
 ]
 

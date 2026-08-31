@@ -7,6 +7,7 @@ import queue
 import select
 import socket
 import threading
+import weakref
 from urllib.parse import urlparse
 
 import msgpack
@@ -28,20 +29,12 @@ FUNCTION_NOT_FOUND_ERR = 0xFE
 GENERIC_ERR = 0xFF
 
 
-class BridgeConnection:
-    """A single connection to an RPC router. Owns the socket and the background
-    read/reconnect thread.
+class _BridgeEngine:
+    """Internal engine of a `Bridge`: owns the socket, the background read/reconnect
+    thread and the handler dispatcher.
 
-    Instances are independent: create one per router you need to talk to. For the
-    common single-router case, prefer the process-wide shared instances managed by
-    the `Bridge` API and the decorators (see the `bridge` module).
-
-    Requires a call to ``start()`` to connect and ``stop()`` to release resources,
-    both methods are idempotent. It can also be used as a context manager.
-
-    Provided handlers run sequentially, in arrival order, on a dedicated dispatcher
-    thread: a handler may call back into the bridge (e.g. ``call``), but a slow
-    handler delays the handlers queued after it.
+    The background threads reference the engine, never the public `Bridge` handle,
+    so an unreachable handle can be garbage collected and stop its engine.
     """
 
     def __init__(
@@ -167,13 +160,6 @@ class BridgeConnection:
             bool: True if connected, False if the timeout expired first.
         """
         return self._is_connected_flag.wait(timeout)
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.stop()
 
     def notify(self, method_name: str, *params):
         """Sends a notification to the server without waiting for a response.
@@ -571,3 +557,149 @@ class BridgeConnection:
                 conn.sendall(packed_data)
             except socket.error as e:
                 raise ConnectionError(f"Send failed due to socket error: {e}")
+
+
+class Bridge:
+    """A MessagePack-RPC bridge to an Arduino router.
+
+    Instances are independent: create one per router you need to talk to, call
+    ``connect()`` to establish the link in the background, and ``disconnect()``
+    when done. It can also be used as a context manager, and an instance that
+    becomes garbage collected disconnects automatically as a safety net.
+
+    How an instance is shared is the caller's concern: an embedding runtime that
+    needs a process-wide bridge creates one instance and exposes it itself.
+
+    Provided handlers run sequentially, in arrival order, on a dedicated dispatcher
+    thread: a handler may call back into the bridge (e.g. ``call``), but a slow
+    handler delays the handlers queued after it.
+
+    Examples:
+        bridge = Bridge()
+        bridge.connect()
+        temperature = bridge.call("get_temperature", "sensor1")
+        bridge.provide("get_status", lambda: "ok")
+        bridge.notify("set_led", "green", True)
+        bridge.disconnect()
+    """
+
+    def __init__(
+        self, address: str = DEFAULT_ADDRESS, max_message_size: int = 1024 * 1024, max_pending_handlers: int = 1024
+    ):
+        """Creates a bridge for the given router address without connecting.
+
+        Args:
+            address (str): The router address, either "unix://<path>" or "tcp://<host>:<port>".
+            max_message_size (int): Maximum size in bytes of a single incoming message; the
+                connection is dropped and re-established when the peer exceeds it. Defaults to 1 MiB.
+            max_pending_handlers (int): Maximum number of queued handler executions; further
+                requests are rejected as busy and further notifications dropped. Defaults to 1024.
+
+        Raises:
+            ValueError: If the address scheme is not supported or the address is incomplete.
+        """
+        self._engine = _BridgeEngine(address, max_message_size, max_pending_handlers)
+        # The engine never references the handle: collecting an abandoned handle stops its engine
+        self._finalizer = weakref.finalize(self, self._engine.stop)
+
+    @property
+    def address(self) -> str:
+        """The router address this bridge points to."""
+        return self._engine.address
+
+    def connect(self):
+        """Starts connecting to the router in the background and returns immediately.
+        The connection is retried until it succeeds (see ``wait_connected``) and
+        re-established automatically whenever it is lost. A no-op if already running.
+        """
+        self._engine.start()
+
+    def disconnect(self):
+        """Closes the connection and releases resources. Idempotent and safe to call
+        even if ``connect()`` was never called; ``connect()`` can be called again afterwards.
+        """
+        self._engine.stop()
+
+    def wait_connected(self, timeout: float | None = None) -> bool:
+        """Waits until the connection to the router is established.
+
+        Args:
+            timeout (float, optional): Maximum time to wait in seconds. Waits indefinitely if None.
+
+        Returns:
+            bool: True if connected, False if the timeout expired first.
+        """
+        return self._engine.wait_connected(timeout)
+
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.disconnect()
+
+    def notify(self, method_name: str, *params):
+        """Sends a notification to the microcontroller without waiting for a response.
+        Best-effort: never blocks waiting for a connection, the notification is
+        dropped if the router is not connected.
+
+        Args:
+            method_name (str): The name of the method to notify on the microcontroller.
+            *params: The parameters to pass to the method.
+
+        Examples:
+            bridge.notify("set_led", "green", True)
+        """
+        self._engine.notify(method_name, *params)
+
+    def call(self, method_name: str, *params, timeout: float | None = 10):
+        """Calls a method on the microcontroller and waits for a response.
+        Raises an exception if the call fails or times out.
+
+        Args:
+            method_name (str): The name of the method to call on the microcontroller.
+            *params: The parameters to pass to the method.
+            timeout (float, optional): The maximum time to wait for a response in seconds.
+                If None, waits indefinitely. Defaults to 10s.
+
+        Raises:
+            ValueError: If the method does not exist or the call fails.
+            TimeoutError: If the call takes more time than the specified timeout.
+            ConnectionError: If the connection drops or is stopped while waiting.
+            RuntimeError: If the call fails unexpectedly.
+
+        Examples:
+            temperature = bridge.call("get_temperature", "sensor1")
+        """
+        return self._engine.call(method_name, *params, timeout=timeout)
+
+    def provide(self, method_name: str, handler):
+        """Makes a method available to the microcontroller, so it can call it remotely.
+        The handler should be a callable that can take arguments.
+
+        Registration is declarative: the handler is recorded immediately, registered
+        with the router as soon as a connection is available, and re-registered
+        transparently on every reconnection.
+
+        Args:
+            method_name (str): The name under which the function should be provided to the microcontroller.
+            handler (callable): The function to call when the microcontroller requires it.
+
+        Raises:
+            ValueError: If handler is not callable.
+
+        Examples:
+            bridge.provide("get_country", get_country)
+        """
+        self._engine.provide(method_name, handler)
+
+    def unprovide(self, method_name: str):
+        """Makes a method no more available to the microcontroller.
+
+        Args:
+            method_name (str): The name under which the function is already provided to the microcontroller.
+
+        Examples:
+            bridge.unprovide("get_country")
+        """
+        self._engine.unprovide(method_name)

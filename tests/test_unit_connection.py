@@ -7,8 +7,6 @@ from unittest.mock import MagicMock, patch
 import msgpack
 from test_unit_common import UnitTest
 
-from arduino.router_bridge import BridgeConnection
-from arduino.router_bridge.bridge import ClientServer
 from arduino.router_bridge.connection import GENERIC_ERR
 
 
@@ -17,7 +15,7 @@ class TestConnection(UnitTest):
         """Tests that provided handlers are re-registered after a connection is re-established."""
         # 1. Initial connection and provide a handler.
         # The setUp method already mocks the main _conn_manager thread, so it won't run and cause errors.
-        client = ClientServer()
+        client = self.make_engine()
         client.call = MagicMock()
         self.connect_client(client)
 
@@ -47,7 +45,7 @@ class TestConnection(UnitTest):
 
     def test_deferred_registration_happens_on_first_connection(self):
         """Tests that handlers provided while disconnected are registered on the first connection."""
-        client = ClientServer()
+        client = self.make_engine()
         client.call = MagicMock()
 
         client.provide("early_handler", lambda: "test")
@@ -64,7 +62,7 @@ class TestConnection(UnitTest):
 
     def test_read_loop_exits_on_unexpected_error(self):
         """The read loop must bail out on unexpected socket errors instead of spinning forever."""
-        client = ClientServer()
+        client = self.make_engine()
         client._conn = MagicMock()
         client._conn.recv.side_effect = OSError("Bad file descriptor")
 
@@ -74,7 +72,7 @@ class TestConnection(UnitTest):
 
     def test_read_loop_fails_pending_callbacks_on_exit(self):
         """The read loop must fail pending requests when the connection is lost."""
-        client = ClientServer()
+        client = self.make_engine()
         client._conn = MagicMock()
         client._conn.recv.return_value = b""  # Orderly shutdown by the router
 
@@ -90,7 +88,7 @@ class TestConnection(UnitTest):
     def test_connect_clears_connected_flag_before_cleanup(self):
         """_connect must signal disconnection before tearing down a dirty connection,
         so senders never see a set flag with a broken connection."""
-        client = ClientServer()
+        client = self.make_engine()
         self.connect_client(client)
 
         # Make the connection look broken while the flag is still set
@@ -111,7 +109,7 @@ class TestLockDiscipline(UnitTest):
 
     def test_sendall_runs_without_holding_conn_lock(self):
         """_send_bytes must not hold _conn_lock during sendall, so stop() can always shut the socket down."""
-        client = ClientServer()
+        client = self.make_engine()
         self.connect_client(client)
 
         conn_lock_free = []
@@ -129,7 +127,7 @@ class TestLockDiscipline(UnitTest):
 
     def test_cancel_request_sent_without_holding_callbacks_lock(self):
         """The timeout path must send $/cancelRequest outside callbacks_lock."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         callbacks_lock_free = []
@@ -150,7 +148,7 @@ class TestLockDiscipline(UnitTest):
 
     def test_registration_on_connect_runs_without_holding_handlers_lock(self):
         """Re-registration must not hold handlers_lock across blocking $/register calls."""
-        client = ClientServer()
+        client = self.make_engine()
 
         handlers_lock_free = []
 
@@ -175,7 +173,7 @@ class TestLockDiscipline(UnitTest):
 
     def test_msgid_reservation_skips_pending_ids(self):
         """Message IDs of pending requests must never be reused."""
-        client = ClientServer()
+        client = self.make_engine()
         client.next_msgid = 0
         with client.callbacks_lock:
             client.callbacks[1] = (None, None)
@@ -186,7 +184,7 @@ class TestLockDiscipline(UnitTest):
 class TestResourceLimits(UnitTest):
     def test_oversized_message_drops_the_connection(self):
         """A message exceeding max_message_size must drop the connection instead of exhausting memory."""
-        client = BridgeConnection(address="unix:///tmp/test.sock", max_message_size=32)
+        client = self.make_engine(address="unix:///tmp/test.sock", max_message_size=32)
         client._conn = MagicMock()
         client._conn.recv.return_value = msgpack.packb([2, "m", ["x" * 100]])
 
@@ -197,7 +195,7 @@ class TestResourceLimits(UnitTest):
 
     def test_full_handler_queue_rejects_requests(self):
         """Requests arriving with a full handler queue must be rejected as busy, not queued unboundedly."""
-        client = BridgeConnection(address="unix:///tmp/test.sock", max_pending_handlers=1)
+        client = self.make_engine(address="unix:///tmp/test.sock", max_pending_handlers=1)
         client._send_response = MagicMock()
         client.handlers["busy_method"] = MagicMock()
 
@@ -212,7 +210,7 @@ class TestResourceLimits(UnitTest):
 
     def test_full_handler_queue_drops_notifications(self):
         """Notifications arriving with a full handler queue must be dropped with a warning."""
-        client = BridgeConnection(address="unix:///tmp/test.sock", max_pending_handlers=1)
+        client = self.make_engine(address="unix:///tmp/test.sock", max_pending_handlers=1)
         client._send_response = MagicMock()
         client.handlers["busy_method"] = MagicMock()
 
@@ -228,19 +226,19 @@ class TestResourceLimits(UnitTest):
 class TestIsConnected(UnitTest):
     def test_no_connection_object(self):
         """_is_connected must be False when there is no connection object."""
-        client = ClientServer()
+        client = self.make_engine()
         self.assertFalse(client._is_connected())
 
     def test_open_idle_socket(self):
         """_is_connected must be True when the socket is open with nothing to read."""
-        client = ClientServer()
+        client = self.make_engine()
         client._conn = MagicMock()
         with patch("arduino.router_bridge.connection.select.select", return_value=([], [], [])):
             self.assertTrue(client._is_connected())
 
     def test_peer_closed_socket(self):
         """_is_connected must be False when the peer performed an orderly shutdown."""
-        client = ClientServer()
+        client = self.make_engine()
         client._conn = MagicMock()
         client._conn.recv.return_value = b""
         with patch("arduino.router_bridge.connection.select.select", return_value=([client._conn], [], [])):
@@ -248,7 +246,7 @@ class TestIsConnected(UnitTest):
 
     def test_readable_socket_with_data(self):
         """_is_connected must be True when the socket has pending data."""
-        client = ClientServer()
+        client = self.make_engine()
         client._conn = MagicMock()
         client._conn.recv.return_value = b"data"
         with patch("arduino.router_bridge.connection.select.select", return_value=([client._conn], [], [])):
@@ -256,7 +254,7 @@ class TestIsConnected(UnitTest):
 
     def test_broken_socket(self):
         """_is_connected must be False when the socket errors out."""
-        client = ClientServer()
+        client = self.make_engine()
         client._conn = MagicMock()
         with patch("arduino.router_bridge.connection.select.select", side_effect=OSError("Bad file descriptor")):
             self.assertFalse(client._is_connected())
