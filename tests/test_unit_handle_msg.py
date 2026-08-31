@@ -89,13 +89,28 @@ class TestHandleMsg(UnitTest):
 
         msgid = 123
         params = [1, 2, 3]
-        request_msg = [0, msgid, method_name.encode(), params]  # Method name as bytes
+        request_msg = [0, msgid, method_name, params]
 
         client._handle_msg(request_msg)
         self.drain_dispatch(client)  # Handlers run on the dispatcher thread, mocked in setUp
 
         handler_mock.assert_called_once_with(*params)
         client._send_response.assert_called_once_with(msgid, None, "handled")
+
+    def test_handle_msg_request_bytes_method_rejected(self):
+        """Test that a non-string method name is rejected as malformed: the router guarantees str."""
+        client = ClientServer()
+        client._send_response = MagicMock()
+
+        handler_mock = MagicMock()
+        client.handlers["provided_method"] = handler_mock
+
+        client._handle_msg([0, 123, b"provided_method", []])  # Method name as bytes
+        self.drain_dispatch(client)
+
+        handler_mock.assert_not_called()
+        client._send_response.assert_not_called()
+        self.assertIn("Invalid method name type", str(self.mock_logger.error.call_args))
 
     def test_handle_msg_request_handler_fail(self):
         """Test handling of a request for a method that fails running its handler."""

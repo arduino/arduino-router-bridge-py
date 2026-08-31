@@ -439,15 +439,12 @@ class BridgeConnection:
             # Connection was lost unexpectedly but we were meant to be running, tell the user
             self._fail_pending_callbacks(ConnectionError("Connection to router lost."))
 
-    # TODO: verify if this is still needed
-    def _decode_method(self, method_name: any) -> str:
-        """Decodes the method name from bytes to string if necessary."""
-        if isinstance(method_name, bytes):
-            return method_name.decode()
-        if isinstance(method_name, str):
-            return method_name
-        else:
-            raise ValueError(f"Invalid method name type: {type(method_name)}. Expected str or bytes.")
+    # The arduino-router guarantees str-encoded method names; anything else is a malformed message
+    def _decode_method(self, method_name) -> str:
+        """Validates that the method name arrived as a string."""
+        if not isinstance(method_name, str):
+            raise ValueError(f"Invalid method name type: {type(method_name)}. Expected str.")
+        return method_name
 
     def _handle_msg(self, msg: list):
         """Processes a single deserialized MessagePack-RPC message."""
