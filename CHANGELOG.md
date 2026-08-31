@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `Bridge`, the decorators and `ClientServer` now share one connection per address: the `address` argument selects the shared connection instead of being silently ignored after the first use. `ClientServer` is now a factory function returning the shared `BridgeConnection`.
+- `Bridge` and the decorators now share one connection per address: the `address` argument selects the shared connection instead of being silently ignored after the first use.
 - Connecting no longer blocks: `start()` returns immediately and the connection is established and retried in the background. Decorating with `@notify`/`@call` no longer opens a connection at import time.
 - `provide` registration is declarative: handlers are recorded immediately and registered with the router as soon as a connection is available, then re-registered on every reconnection. `provide`/`unprovide` no longer raise if the router is unreachable.
 - `@call(timeout=None)` and `Bridge.call(timeout=None)` now wait indefinitely as documented.
@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `set_address_resolver`: bind the default address directly with `Bridge.connect(address)` instead; explicit `address` arguments are no longer remapped.
 - `set_logger`: attach a handler or set a level on the `arduino.router_bridge` logger namespace instead.
+- `ClientServer`: shared connections are managed via `Bridge.connect`, the decorators, or `BridgeConnection` for multi-instance use.
+- The RPC error-code constants are no longer exported: they never reach callers in a structured form.
 
 ### Security
 

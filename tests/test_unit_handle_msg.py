@@ -6,12 +6,12 @@ from unittest.mock import MagicMock
 
 from test_unit_common import UnitTest
 
-from arduino.router_bridge import (
+from arduino.router_bridge.bridge import ClientServer
+from arduino.router_bridge.connection import (
     FUNCTION_NOT_FOUND_ERR,
     GENERIC_ERR,
     MALFORMED_CALL_ERR,
     ROUTE_ALREADY_EXISTS_ERR,
-    ClientServer,
 )
 
 

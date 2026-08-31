@@ -77,8 +77,8 @@ from arduino.router_bridge import Bridge
 Bridge.connect(os.environ["APP_SOCKET"])
 ```
 
-`Bridge`, the decorators and `ClientServer` share one process-wide connection per
-address, established lazily in the background and reconnected automatically:
+`Bridge` and the decorators share one process-wide connection per address,
+established lazily in the background and reconnected automatically:
 provided methods are registered as soon as the connection is available and
 re-registered transparently whenever it is re-established. Call `shutdown()` to
 stop the shared connections, for example on application exit.

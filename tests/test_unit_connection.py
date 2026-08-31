@@ -7,8 +7,9 @@ from unittest.mock import MagicMock, patch
 import msgpack
 from test_unit_common import UnitTest
 
-from arduino.router_bridge import GENERIC_ERR, BridgeConnection
+from arduino.router_bridge import BridgeConnection
 from arduino.router_bridge.bridge import ClientServer
+from arduino.router_bridge.connection import GENERIC_ERR
 
 
 class TestConnection(UnitTest):

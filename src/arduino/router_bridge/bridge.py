@@ -10,7 +10,6 @@ from .connection import DEFAULT_ADDRESS, BridgeConnection
 
 __all__ = [
     "Bridge",
-    "ClientServer",
     "notify",
     "call",
     "provide",
@@ -44,8 +43,8 @@ def ClientServer(address: str | None = None) -> BridgeConnection:
     """Returns the process-wide shared connection for the given address, starting it if needed.
     Uses the default address (see `Bridge.connect`) if none is given.
 
-    All callers requesting the same address share the same `BridgeConnection` instance.
-    Provided for embedding runtimes; application code should prefer `Bridge` or the decorators.
+    Internal accessor to the shared-connection pool, not part of the public API:
+    application code should use `Bridge`, the decorators or `BridgeConnection`.
     """
     return _get_instance(address)
 
