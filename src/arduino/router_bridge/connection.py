@@ -11,8 +11,7 @@ from urllib.parse import urlparse
 
 import msgpack
 
-# Standard library logger: silent unless the application attaches a handler to the
-# "arduino.router_bridge" namespace or enables propagation to the root logger
+# Library logger: silent unless the application configures the "arduino.router_bridge" namespace
 logger = logging.getLogger(__name__)
 
 DEFAULT_ADDRESS = "unix:///var/run/arduino-router.sock"
@@ -45,11 +44,17 @@ class BridgeConnection:
     handler delays the handlers queued after it.
     """
 
-    def __init__(self, address: str = DEFAULT_ADDRESS):
+    def __init__(
+        self, address: str = DEFAULT_ADDRESS, max_message_size: int = 1024 * 1024, max_pending_handlers: int = 1024
+    ):
         """Creates a connection for the given router address without connecting.
 
         Args:
             address (str): The router address, either "unix://<path>" or "tcp://<host>:<port>".
+            max_message_size (int): Maximum size in bytes of a single incoming message; the
+                connection is dropped and re-established when the peer exceeds it. Defaults to 1 MiB.
+            max_pending_handlers (int): Maximum number of queued handler executions; further
+                requests are rejected as busy and further notifications dropped. Defaults to 1024.
 
         Raises:
             ValueError: If the address scheme is not supported or the address is incomplete.
@@ -76,6 +81,9 @@ class BridgeConnection:
                 "expected unix://<path> or tcp://<host>:<port>."
             )
 
+        self._max_message_size = max_message_size
+        self._max_pending_handlers = max_pending_handlers
+
         self.next_msgid = 0  # Guarded by callbacks_lock
         self.callbacks = {}  # msgid -> (on_result, on_error)
         self.callbacks_lock = threading.Lock()
@@ -89,7 +97,8 @@ class BridgeConnection:
         self._is_connected_flag = threading.Event()  # This avoids locking recv calls
         self._stop_event = threading.Event()
         self._read_thread = None
-        self._dispatch_queue = queue.SimpleQueue()  # Incoming requests/notifications for the dispatcher
+        # Incoming requests/notifications for the dispatcher, bounded to cap memory usage
+        self._dispatch_queue = queue.Queue(maxsize=max_pending_handlers)
         self._dispatch_thread = None
 
     def start(self):
@@ -103,7 +112,7 @@ class BridgeConnection:
                 return
             self._stop_event.clear()
             # Fresh queue: items and stop sentinels from a previous run must not leak into this one
-            self._dispatch_queue = queue.SimpleQueue()
+            self._dispatch_queue = queue.Queue(maxsize=self._max_pending_handlers)
             self._dispatch_thread = threading.Thread(
                 target=self._dispatch_loop, args=(self._dispatch_queue,), name="Bridge.dispatch_loop", daemon=True
             )
@@ -119,8 +128,7 @@ class BridgeConnection:
             self._stop_event.set()
             self._is_connected_flag.clear()
 
-            # Shutting the socket down wakes a blocked recv() and makes a sendall() blocked
-            # mid-transfer fail: _conn_lock is never held during those, so this cannot deadlock.
+            # Shutdown wakes a blocked recv()/sendall(); _conn_lock is never held during those, so this cannot deadlock
             with self._conn_lock:
                 if self._conn is not None:
                     try:
@@ -133,7 +141,10 @@ class BridgeConnection:
                         pass
                     self._conn = None
 
-            self._dispatch_queue.put(None)  # Wake the dispatcher so it can exit
+            try:
+                self._dispatch_queue.put_nowait(None)  # Wake the dispatcher so it can exit
+            except queue.Full:
+                pass  # The dispatcher is draining items and will notice the stop event by itself
 
             current = threading.current_thread()
             for thread in (self._read_thread, self._dispatch_thread):
@@ -216,8 +227,7 @@ class BridgeConnection:
             with self.callbacks_lock:
                 pending = self.callbacks.pop(msgid, None)
             if pending:
-                # Best-effort cancellation, outside callbacks_lock: sending performs
-                # blocking I/O that must not stall response dispatching
+                # Best-effort cancellation outside callbacks_lock: sending blocks and must not stall response dispatching
                 try:
                     self.notify("$/cancelRequest", msgid)
                 except Exception:
@@ -282,15 +292,18 @@ class BridgeConnection:
             self._run_handler(*item)
 
     def _run_handler(self, handler, method_name, msgid, params):
-        """Executes a user-provided handler, replying to the router when msgid identifies a request."""
+        """Executes a user-provided handler, replying to the router when msgid identifies a request.
+        Handler exceptions are reported to the peer by exception type only; full details stay in the local log.
+        """
         try:
             result = handler(*params)
             if msgid is not None:
                 self._send_response(msgid, None, result)
         except Exception as e:
-            logger.error(f"Failed to run user-provided handler for method '{method_name}': {e}")
+            logger.error(f"Failed to run user-provided handler for method '{method_name}': {e}", exc_info=True)
             if msgid is not None:
-                self._send_response(msgid, e, None)
+                err_code = MALFORMED_CALL_ERR if isinstance(e, (TypeError, ValueError)) else GENERIC_ERR
+                self._send_response(msgid, [err_code, f"Unhandled {type(e).__name__} in handler"], None)
 
     def _conn_manager(self):
         """Manages connection and reconnection attempts. Once the connection is established, delegates to the read loop."""
@@ -316,8 +329,7 @@ class BridgeConnection:
 
         if self._conn:
             with self._conn_lock:
-                # We're in a dirty state since we have a valid _conn object but looks like we're not connected.
-                # Clean up the old, probably broken, connection object.
+                # Dirty state: we have a _conn object but we're not connected, drop the broken connection object
                 try:
                     self._conn.close()
                 except Exception:
@@ -350,8 +362,7 @@ class BridgeConnection:
                         pass
                     return
 
-                # Register the provided methods in a separate thread: registration performs
-                # blocking calls whose responses arrive only once the read loop is running
+                # Register in a separate thread: each call blocks for a response that arrives once the read loop runs
                 def register_methods_on_connect():
                     with self.handlers_lock:
                         methods = list(self.handlers.keys())
@@ -384,8 +395,7 @@ class BridgeConnection:
             readable, _, _ = select.select([conn], [], [], 0)
             if not readable:
                 return True  # Socket is open and reading from it would block
-            # Make sure we don't remove bytes from the buffer (peek only); recv won't
-            # block since select reported the socket as readable
+            # Peek without consuming buffered bytes; select guarantees this recv won't block
             data = conn.recv(8, socket.MSG_PEEK)
             if len(data) == 0:
                 return False
@@ -403,7 +413,7 @@ class BridgeConnection:
         handled by the caller.
         """
         conn = self._conn
-        unpacker = msgpack.Unpacker()
+        unpacker = msgpack.Unpacker(max_buffer_size=self._max_message_size)
         try:
             while not self._stop_event.is_set():
                 try:
@@ -414,6 +424,9 @@ class BridgeConnection:
                     unpacker.feed(data)
                     for msg in unpacker:
                         self._handle_msg(msg)
+                except msgpack.exceptions.BufferFull:
+                    logger.error(f"Incoming message exceeds the {self._max_message_size} bytes limit, reconnecting")
+                    break
                 except ConnectionResetError as e:
                     logger.warning(f"Connection reset in read loop: {e}")
                     break
@@ -457,10 +470,14 @@ class BridgeConnection:
                     handler = self.handlers.get(method_name)
 
                 if handler:
-                    # Hand off to the dispatcher thread: user code must not run on the read thread
-                    self._dispatch_queue.put((handler, method_name, msgid, params))
+                    try:
+                        # Hand off to the dispatcher thread: user code must not run on the read thread
+                        self._dispatch_queue.put_nowait((handler, method_name, msgid, params))
+                    except queue.Full:
+                        logger.warning(f"Handler queue full, rejecting request for method '{method_name}'")
+                        self._send_response(msgid, [GENERIC_ERR, "Server busy: too many pending requests."], None)
                 else:
-                    self._send_response(msgid, NameError(f"Method not found: '{method_name}'", method_name), None)
+                    self._send_response(msgid, [FUNCTION_NOT_FOUND_ERR, f"Method not found: '{method_name}'"], None)
 
             elif msg_type == 1:  # Response: [1, msgid, error, result]
                 if len(msg) != 4:
@@ -476,8 +493,7 @@ class BridgeConnection:
                     if result is None and error is None:
                         on_result(None)
                     else:
-                        # Treat ROUTE_ALREADY_EXISTS_ERR error as OK. It only means that the router already knows about the
-                        # method and registering it is not necessary. It's an internal and recoverable situation.
+                        # Treat ROUTE_ALREADY_EXISTS_ERR as OK: the router already knows the method, a recoverable situation
                         if result is not None or (error is not None and error[0] == ROUTE_ALREADY_EXISTS_ERR):
                             on_result(result)
                         elif error is not None:
@@ -500,8 +516,11 @@ class BridgeConnection:
                     handler = self.handlers.get(method_name)
 
                 if handler:
-                    # Hand off to the dispatcher thread; msgid None marks a notification (no response)
-                    self._dispatch_queue.put((handler, method_name, None, params))
+                    try:
+                        # Hand off to the dispatcher thread; msgid None marks a notification (no response)
+                        self._dispatch_queue.put_nowait((handler, method_name, None, params))
+                    except queue.Full:
+                        logger.warning(f"Handler queue full, dropping notification for method '{method_name}'")
             else:
                 logger.warning(f"Invalid RPC message type received: {msg_type}")
 
@@ -521,18 +540,8 @@ class BridgeConnection:
                         logger.error(f"Failed to run 'on_error' callback: {e}")
             self.callbacks.clear()
 
-    def _send_response(self, msgid: int, error, response):
-        """Helper to pack and send a response message."""
-        err = None
-        if error is not None:
-            err_code = GENERIC_ERR
-            err_msg = str(error)
-            if isinstance(error, NameError):
-                err_code = FUNCTION_NOT_FOUND_ERR
-            elif isinstance(error, TypeError) or isinstance(error, ValueError):
-                err_code = MALFORMED_CALL_ERR
-            err = [err_code, err_msg]
-
+    def _send_response(self, msgid: int, err: list | None, response):
+        """Helper to pack and send a response message. err is None or an [err_code, err_msg] pair."""
         msg = [1, msgid, err, response]
         try:
             self._send_bytes(msgpack.packb(msg))
@@ -553,8 +562,7 @@ class BridgeConnection:
         if conn is None:
             raise ConnectionError("No connection object for router, send failed.")
 
-        # Serialize writes with a dedicated lock, kept separate from _conn_lock so that
-        # stop() can shut the socket down even while a send is blocked mid-transfer
+        # The dedicated send lock lets stop() shut the socket down even while a send is blocked mid-transfer
         with self._send_lock:
             try:
                 conn.sendall(packed_data)

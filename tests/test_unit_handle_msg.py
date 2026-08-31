@@ -6,7 +6,13 @@ from unittest.mock import MagicMock
 
 from test_unit_common import UnitTest
 
-from arduino.router_bridge import GENERIC_ERR, ROUTE_ALREADY_EXISTS_ERR, ClientServer
+from arduino.router_bridge import (
+    FUNCTION_NOT_FOUND_ERR,
+    GENERIC_ERR,
+    MALFORMED_CALL_ERR,
+    ROUTE_ALREADY_EXISTS_ERR,
+    ClientServer,
+)
 
 
 class TestHandleMsg(UnitTest):
@@ -97,7 +103,7 @@ class TestHandleMsg(UnitTest):
         client._send_response = MagicMock()
 
         request_msg = [0, 111, "failing_method", []]
-        client.handlers["failing_method"] = MagicMock(side_effect=ValueError("Handler failed"))
+        client.handlers["failing_method"] = MagicMock(side_effect=ValueError("secret database password"))
 
         client._handle_msg(request_msg)
         self.drain_dispatch(client)
@@ -105,8 +111,9 @@ class TestHandleMsg(UnitTest):
         client._send_response.assert_called_once()
         args, _ = client._send_response.call_args
         self.assertEqual(args[0], 111)  # msgid
-        self.assertIsInstance(args[1], ValueError)  # error
+        self.assertEqual(args[1], [MALFORMED_CALL_ERR, "Unhandled ValueError in handler"])  # error
         self.assertIsNone(args[2])  # result
+        self.assertNotIn("secret", str(args))  # Exception details must not leak to the peer
 
     def test_handle_msg_request_method_not_found(self):
         """Test handling of a request for a method that is not found."""
@@ -120,7 +127,7 @@ class TestHandleMsg(UnitTest):
         client._send_response.assert_called_once()
         args, _ = client._send_response.call_args
         self.assertEqual(args[0], 456)  # msgid
-        self.assertIsInstance(args[1], NameError)  # error
+        self.assertEqual(args[1], [FUNCTION_NOT_FOUND_ERR, "Method not found: 'unknown_method'"])  # error
         self.assertIsNone(args[2])  # result
 
     def test_handle_msg_notification(self):

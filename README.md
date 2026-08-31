@@ -96,6 +96,19 @@ with BridgeConnection("tcp://192.168.1.10:5000") as conn:
     conn.call("get_temperature", "sensor1")
 ```
 
+## Security model
+
+The router socket is the trust boundary: any process that can connect to it can
+invoke the provided methods and forge RPC responses. Unix sockets are protected by
+file permissions, managed by the Arduino Router. `tcp://` connections carry no
+authentication or encryption: use them only on localhost or an isolated, trusted
+network, and never expose them to untrusted hosts.
+
+Handler exceptions are reported to the caller by exception type only; full details,
+including the traceback, stay in the local log. To bound memory usage, incoming
+messages are capped at 1 MiB and pending handler executions at 1024 by default;
+both limits are configurable per `BridgeConnection`.
+
 ## Logging
 
 The library logs through the standard `logging` module under the

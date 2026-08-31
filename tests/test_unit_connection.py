@@ -4,8 +4,10 @@
 
 from unittest.mock import MagicMock, patch
 
+import msgpack
 from test_unit_common import UnitTest
 
+from arduino.router_bridge import GENERIC_ERR, BridgeConnection
 from arduino.router_bridge.bridge import ClientServer
 
 
@@ -178,6 +180,48 @@ class TestLockDiscipline(UnitTest):
             client.callbacks[1] = (None, None)
             client.callbacks[2] = (None, None)
             self.assertEqual(client._next_msgid_locked(), 3)
+
+
+class TestResourceLimits(UnitTest):
+    def test_oversized_message_drops_the_connection(self):
+        """A message exceeding max_message_size must drop the connection instead of exhausting memory."""
+        client = BridgeConnection(address="unix:///tmp/test.sock", max_message_size=32)
+        client._conn = MagicMock()
+        client._conn.recv.return_value = msgpack.packb([2, "m", ["x" * 100]])
+
+        client._read_loop()  # Must return so the connection manager reconnects with a fresh buffer
+
+        client._conn.recv.assert_called_once()  # No retry after the limit was hit
+        self.assertIn("exceeds", str(self.mock_logger.error.call_args))
+
+    def test_full_handler_queue_rejects_requests(self):
+        """Requests arriving with a full handler queue must be rejected as busy, not queued unboundedly."""
+        client = BridgeConnection(address="unix:///tmp/test.sock", max_pending_handlers=1)
+        client._send_response = MagicMock()
+        client.handlers["busy_method"] = MagicMock()
+
+        client._dispatch_queue.put_nowait("occupies the only slot")
+
+        client._handle_msg([0, 42, "busy_method", []])
+
+        client._send_response.assert_called_once_with(
+            42, [GENERIC_ERR, "Server busy: too many pending requests."], None
+        )
+        client.handlers["busy_method"].assert_not_called()
+
+    def test_full_handler_queue_drops_notifications(self):
+        """Notifications arriving with a full handler queue must be dropped with a warning."""
+        client = BridgeConnection(address="unix:///tmp/test.sock", max_pending_handlers=1)
+        client._send_response = MagicMock()
+        client.handlers["busy_method"] = MagicMock()
+
+        client._dispatch_queue.put_nowait("occupies the only slot")
+
+        client._handle_msg([2, "busy_method", []])
+
+        client._send_response.assert_not_called()  # Notifications never get responses
+        client.handlers["busy_method"].assert_not_called()
+        self.assertIn("dropping notification", str(self.mock_logger.warning.call_args))
 
 
 class TestIsConnected(UnitTest):

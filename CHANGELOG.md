@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `set_address_resolver`: bind the default address directly with `Bridge.connect(address)` instead; explicit `address` arguments are no longer remapped.
 - `set_logger`: attach a handler or set a level on the `arduino.router_bridge` logger namespace instead.
 
+### Security
+
+- Handler exceptions are reported to the peer by exception type only; the message and traceback stay in the local log.
+- Incoming messages are capped at 1 MiB and queued handler executions at 1024 by default, bounding memory usage; both limits are configurable per `BridgeConnection`.
+- The trust model is now documented: the router socket is the boundary, and `tcp://` carries no authentication or encryption.
+
 ### Fixed
 
 - Calls pending when the connection drops or the bridge is stopped now raise a `ConnectionError` instead of an internal `TypeError`.
