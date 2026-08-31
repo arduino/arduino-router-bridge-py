@@ -63,11 +63,9 @@ instance is shared is the caller's concern; an embedding runtime that needs a
 process-wide bridge creates one instance at startup and exposes it itself:
 
 ```python
-import os
-
 from arduino.router_bridge import Bridge
 
-bridge = Bridge(os.environ["APP_SOCKET"])
+bridge = Bridge()  # Connects to unix:///var/run/arduino-router.sock
 bridge.connect()
 ```
 
