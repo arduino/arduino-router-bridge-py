@@ -4,35 +4,41 @@
 
 from unittest.mock import MagicMock
 
-from arduino.router_bridge.bridge import ClientServer, ROUTE_ALREADY_EXISTS_ERR, GENERIC_ERR
 from test_unit_common import UnitTest
+
+from arduino.router_bridge.connection import (
+    FUNCTION_NOT_FOUND_ERR,
+    GENERIC_ERR,
+    MALFORMED_CALL_ERR,
+    ROUTE_ALREADY_EXISTS_ERR,
+)
 
 
 class TestHandleMsg(UnitTest):
     def test_empty_msg(self):
         """Test handling of an empty message."""
-        client = ClientServer()
+        client = self.make_engine()
         client._handle_msg([])
         self.mock_logger.warning.assert_called_once_with("Invalid RPC message received (must be a non-empty list).")
         self.mock_logger.error.assert_not_called()
 
     def test_unknown_msg_type(self):
         """Test handling of an unknown message type."""
-        client = ClientServer()
+        client = self.make_engine()
         client._handle_msg([99, 1, None, "result"])  # Msg type 99 does not exist
         self.mock_logger.warning.assert_called_once_with("Invalid RPC message type received: 99")
         self.mock_logger.error.assert_not_called()
 
     def test_unknown_msg_id(self):
         """Test handling of an unknown message id."""
-        client = ClientServer()
+        client = self.make_engine()
         client._handle_msg([1, 9999, None, "result"])  # Msg id 9999 does not exist
         self.mock_logger.warning.assert_called_once_with("Response for unknown msgid 9999 received.")
         self.mock_logger.error.assert_not_called()
 
     def test_malformed_messages(self):
         """Test handling of malformed messages."""
-        client = ClientServer()
+        client = self.make_engine()
 
         client._handle_msg([0, 1, "method", [0, 1], "extra field"])  # Malformed payload
         self.mock_logger.warning.assert_not_called()
@@ -73,7 +79,7 @@ class TestHandleMsg(UnitTest):
 
     def test_handle_msg_request(self):
         """Test handling of an incoming request message."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_response = MagicMock()
 
         handler_mock = MagicMock(return_value="handled")
@@ -82,32 +88,50 @@ class TestHandleMsg(UnitTest):
 
         msgid = 123
         params = [1, 2, 3]
-        request_msg = [0, msgid, method_name.encode(), params]  # Method name as bytes
+        request_msg = [0, msgid, method_name, params]
 
         client._handle_msg(request_msg)
+        self.drain_dispatch(client)  # Handlers run on the dispatcher thread, mocked in setUp
 
         handler_mock.assert_called_once_with(*params)
         client._send_response.assert_called_once_with(msgid, None, "handled")
 
+    def test_handle_msg_request_bytes_method_rejected(self):
+        """Test that a non-string method name is rejected as malformed: the router guarantees str."""
+        client = self.make_engine()
+        client._send_response = MagicMock()
+
+        handler_mock = MagicMock()
+        client.handlers["provided_method"] = handler_mock
+
+        client._handle_msg([0, 123, b"provided_method", []])  # Method name as bytes
+        self.drain_dispatch(client)
+
+        handler_mock.assert_not_called()
+        client._send_response.assert_not_called()
+        self.assertIn("Invalid method name type", str(self.mock_logger.error.call_args))
+
     def test_handle_msg_request_handler_fail(self):
         """Test handling of a request for a method that fails running its handler."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_response = MagicMock()
 
         request_msg = [0, 111, "failing_method", []]
-        client.handlers["failing_method"] = MagicMock(side_effect=ValueError("Handler failed"))
+        client.handlers["failing_method"] = MagicMock(side_effect=ValueError("secret database password"))
 
         client._handle_msg(request_msg)
+        self.drain_dispatch(client)
 
         client._send_response.assert_called_once()
         args, _ = client._send_response.call_args
         self.assertEqual(args[0], 111)  # msgid
-        self.assertIsInstance(args[1], ValueError)  # error
+        self.assertEqual(args[1], [MALFORMED_CALL_ERR, "Unhandled ValueError in handler"])  # error
         self.assertIsNone(args[2])  # result
+        self.assertNotIn("secret", str(args))  # Exception details must not leak to the peer
 
     def test_handle_msg_request_method_not_found(self):
         """Test handling of a request for a method that is not found."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_response = MagicMock()
 
         request_msg = [0, 456, "unknown_method", []]
@@ -117,12 +141,12 @@ class TestHandleMsg(UnitTest):
         client._send_response.assert_called_once()
         args, _ = client._send_response.call_args
         self.assertEqual(args[0], 456)  # msgid
-        self.assertIsInstance(args[1], NameError)  # error
+        self.assertEqual(args[1], [FUNCTION_NOT_FOUND_ERR, "Method not found: 'unknown_method'"])  # error
         self.assertIsNone(args[2])  # result
 
     def test_handle_msg_notification(self):
         """Test handling of an incoming notification message."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_response = MagicMock()
 
         handler_mock = MagicMock()
@@ -133,13 +157,14 @@ class TestHandleMsg(UnitTest):
         notification_msg = [2, method_name, params]
 
         client._handle_msg(notification_msg)
+        self.drain_dispatch(client)
 
         handler_mock.assert_called_once_with(*params)
         client._send_response.assert_not_called()  # Notifications don't get responses
 
     def test_handle_msg_response(self):
         """Test handling of an incoming response message."""
-        client = ClientServer()
+        client = self.make_engine()
 
         msgid = 789
         result_data = {"status": "ok"}
@@ -159,7 +184,7 @@ class TestHandleMsg(UnitTest):
 
     def test_handle_msg_generic_error_response(self):
         """Test handling of an incoming error response message."""
-        client = ClientServer()
+        client = self.make_engine()
 
         msgid = 101112
         result_data = None
@@ -180,7 +205,7 @@ class TestHandleMsg(UnitTest):
 
     def test_handle_msg_method_exists_error_response(self):
         """Test handling of an incoming error response message that signals a method is already provided."""
-        client = ClientServer()
+        client = self.make_engine()
 
         msgid = 131415
         result_data = None

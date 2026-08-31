@@ -4,34 +4,14 @@
 
 import logging
 
-from .bridge import (
+from .connection import (
+    DEFAULT_ADDRESS,
     Bridge,
-    ClientServer,
-    notify,
-    call,
-    provide,
-    set_address_resolver,
-    set_logger,
-    ROUTE_ALREADY_EXISTS_ERR,
-    BUFFER_LIMIT_EXCEEDED_ERR,
-    MALFORMED_CALL_ERR,
-    FUNCTION_NOT_FOUND_ERR,
-    GENERIC_ERR,
 )
 
 __all__ = [
     "Bridge",
-    "ClientServer",
-    "notify",
-    "call",
-    "provide",
-    "set_address_resolver",
-    "set_logger",
-    "ROUTE_ALREADY_EXISTS_ERR",
-    "BUFFER_LIMIT_EXCEEDED_ERR",
-    "MALFORMED_CALL_ERR",
-    "FUNCTION_NOT_FOUND_ERR",
-    "GENERIC_ERR",
+    "DEFAULT_ADDRESS",
 ]
 
 # Library convention: emit nothing unless the application configures logging

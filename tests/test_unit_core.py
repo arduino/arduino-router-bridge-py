@@ -2,55 +2,46 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-from unittest.mock import MagicMock, patch
-import msgpack
+import time
+from unittest.mock import MagicMock
 
-from arduino.router_bridge.bridge import ClientServer, GENERIC_ERR, set_address_resolver
+import msgpack
 from test_unit_common import UnitTest
+
+from arduino.router_bridge.connection import GENERIC_ERR
 
 
 class TestCoreFeatures(UnitTest):
     def test_initialization_default_address(self):
-        """Test that the ClientServer connects to the default router address when none is given."""
-        client = ClientServer()
+        """Test that the bridge connects to the default router address when none is given."""
+        client = self.make_engine()
         self.assertEqual(client.socket_type, "unix")
         self.assertEqual(client._peer_addr, "/var/run/arduino-router.sock")
 
-    def test_address_resolver(self):
-        """Test that an installed address resolver overrides the address used by new connections."""
-        with patch("arduino.router_bridge.bridge._address_resolver", None):  # Remove the resolver on exit
-            set_address_resolver(lambda address: "tcp://somehost:4321")
-            client = ClientServer()
-            self.assertEqual(client.socket_type, "tcp")
-            self.assertEqual(client._peer_addr, ("somehost", 4321))
-
-    def test_address_resolver_receives_requested_address(self):
-        """Test that the resolver is given the requested address, so it can pass it through."""
-        with patch("arduino.router_bridge.bridge._address_resolver", None):  # Remove the resolver on exit
-            set_address_resolver(lambda address: address)
-            client = ClientServer(address="unix:///tmp/test.sock")
-            self.assertEqual(client._peer_addr, "/tmp/test.sock")
-
     def test_initialization_tcp(self):
-        """Test that the ClientServer initializes correctly with a TCP address."""
-        client = ClientServer(address="tcp://localhost:1234")
+        """Test that the bridge initializes correctly with a TCP address and connects on demand."""
+        client = self.make_engine(address="tcp://localhost:1234")
         self.assertEqual(client.socket_type, "tcp")
         self.assertEqual(client._peer_addr, ("localhost", 1234))
+        self.assertEqual(self.mock_thread_instance.start.call_count, 2)  # start() spawns read loop and dispatcher
+
+        self.connect_client(client)
         self.mock_socket.create_connection.assert_called_with(("localhost", 1234), timeout=5)
-        self.mock_thread_instance.start.assert_called_once()
 
     def test_initialization_unix(self):
-        """Test that the ClientServer initializes correctly with a Unix socket address."""
-        client = ClientServer(address="unix:///tmp/test.sock")
+        """Test that the bridge initializes correctly with a Unix socket address and connects on demand."""
+        client = self.make_engine(address="unix:///tmp/test.sock")
         self.assertEqual(client.socket_type, "unix")
         self.assertEqual(client._peer_addr, "/tmp/test.sock")
+        self.assertEqual(self.mock_thread_instance.start.call_count, 2)  # start() spawns read loop and dispatcher
+
+        self.connect_client(client)
         self.mock_socket.socket.assert_called_with(self.mock_socket.AF_UNIX, self.mock_socket.SOCK_STREAM)
         self.mock_socket_instance.connect.assert_called_with("/tmp/test.sock")
-        self.mock_thread_instance.start.assert_called_once()
 
     def test_notify(self):
         """Test that the notify method sends a correctly formatted msgpack notification."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         method_name = "test_notify"
@@ -60,11 +51,21 @@ class TestCoreFeatures(UnitTest):
         expected_request = [2, method_name, params]
         expected_packed_data = msgpack.packb(expected_request)
 
-        client._send_bytes.assert_called_once_with(expected_packed_data)
+        client._send_bytes.assert_called_once_with(expected_packed_data, wait_for_connection=False)
+
+    def test_notify_does_not_block_when_disconnected(self):
+        """Test that notify returns immediately and drops the message when the router is not connected."""
+        client = self.make_engine()
+
+        start = time.monotonic()
+        client.notify("set_led", "green")  # Must not wait for a reconnection
+        self.assertLess(time.monotonic() - start, 0.5)
+
+        self.mock_socket_instance.sendall.assert_not_called()
 
     def test_call_successful(self):
         """Test a successful RPC call where a response is received."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         method_name = "test_call"
@@ -88,7 +89,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_call_successful_nones(self):
         """Test a successful RPC call without params where a None response is received."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         method_name = "test_call"
@@ -112,7 +113,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_call_timeout(self):
         """Test that an RPC call raises a TimeoutError if no response is received."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()  # Don't simulate a response
 
         with self.assertRaises(TimeoutError):
@@ -120,7 +121,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_call_server_error(self):
         """Test an RPC call that returns an error from the server."""
-        client = ClientServer()
+        client = self.make_engine()
         client._send_bytes = MagicMock()
 
         method_name = "test_error"
@@ -139,9 +140,10 @@ class TestCoreFeatures(UnitTest):
         self.assertIn("Something went wrong", str(cm.exception))
 
     def test_provide_and_unprovide(self):
-        """Test providing a method and then unproviding it."""
-        client = ClientServer()
+        """Test providing a method and then unproviding it while connected."""
+        client = self.make_engine()
         client.call = MagicMock()
+        self.connect_client(client)
 
         method_name = "my_handler"
         handler = lambda x: x * 2
@@ -159,10 +161,27 @@ class TestCoreFeatures(UnitTest):
         client.call.assert_called_once_with("$/unregister", method_name)
         self.assertNotIn(method_name, client.handlers)
 
+    def test_provide_while_disconnected_defers_registration(self):
+        """Test that providing while disconnected records the handler without calling the router."""
+        client = self.make_engine()
+        client.call = MagicMock()
+
+        method_name = "my_handler"
+        handler = lambda x: x
+
+        client.provide(method_name, handler)
+        client.call.assert_not_called()  # Registration is deferred to (re)connection
+        self.assertIn(method_name, client.handlers)
+
+        client.unprovide(method_name)
+        client.call.assert_not_called()
+        self.assertNotIn(method_name, client.handlers)
+
     def test_provide_update(self):
         """Test that it is possible to update a provided method."""
-        client = ClientServer()
+        client = self.make_engine()
         client.call = MagicMock()
+        self.connect_client(client)
 
         method_name = "my_handler"
         handler = lambda x: x

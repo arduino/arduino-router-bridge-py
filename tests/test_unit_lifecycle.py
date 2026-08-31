@@ -9,88 +9,116 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
-from arduino.router_bridge.bridge import _ClientServer
+from arduino.router_bridge import Bridge
+from arduino.router_bridge.connection import _BridgeEngine
 
 
 class TestLifecycle(unittest.TestCase):
-    """Lifecycle tests for the connection worker, using real threads."""
+    """Lifecycle tests for the bridge, using real threads."""
 
     def setUp(self):
-        self.logger_patcher = patch("arduino.router_bridge.bridge.logger", MagicMock())
+        self.logger_patcher = patch("arduino.router_bridge.connection.logger", MagicMock())
         self.logger_patcher.start()
         self.addCleanup(self.logger_patcher.stop)
 
-    def _start_dummy_server(self):
-        """Starts a Unix-socket server that accepts one connection and holds it open."""
+    def _start_dummy_server(self, accept_count=1):
+        """Starts a Unix-socket server that accepts the given number of connections and holds them open."""
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         sock_path = os.path.join(tmpdir.name, "test.sock")
 
         server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server_sock.bind(sock_path)
-        server_sock.listen(1)
+        server_sock.listen(accept_count)
         self.addCleanup(server_sock.close)
 
         ready = threading.Event()
 
         def serve():
             ready.set()
-            try:
-                conn, _ = server_sock.accept()
-                self.addCleanup(conn.close)
-            except OSError:
-                pass
+            for _ in range(accept_count):
+                try:
+                    conn, _ = server_sock.accept()
+                    self.addCleanup(conn.close)
+                except OSError:
+                    return
 
         threading.Thread(target=serve, daemon=True).start()
         self.assertTrue(ready.wait(timeout=2), "Dummy server did not become ready")
         return sock_path
 
-    def test_start_then_stop_joins_background_thread(self):
-        """start() spawns a real background thread; stop() must join it so it does not leak."""
+    def test_connect_is_non_blocking(self):
+        """connect() must return immediately even if the router is not reachable."""
+        bridge = Bridge("unix:///tmp/never-exists.sock")
+        bridge.connect()  # Must not block waiting for a connection
+        self.addCleanup(bridge.disconnect)
+        self.assertFalse(bridge.wait_connected(timeout=0.1))
+
+    def test_connect_then_disconnect_joins_background_threads(self):
+        """connect() spawns real background threads; disconnect() must join them so they do not leak."""
         sock_path = self._start_dummy_server()
 
-        client = _ClientServer(address=f"unix://{sock_path}")
-        client.start()
-        self.assertTrue(client._is_connected_flag.wait(timeout=2), "Client did not connect")
-        background_thread = client._read_thread
-        self.assertTrue(background_thread.is_alive())
+        bridge = Bridge(f"unix://{sock_path}")
+        bridge.connect()
+        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
+        read_thread = bridge._engine._read_thread
+        dispatch_thread = bridge._engine._dispatch_thread
+        self.assertTrue(read_thread.is_alive())
+        self.assertTrue(dispatch_thread.is_alive())
 
-        client.stop()
+        bridge.disconnect()
 
-        self.assertFalse(background_thread.is_alive(), "Background thread leaked after stop()")
-        self.assertIsNone(client._read_thread)
+        self.assertFalse(read_thread.is_alive(), "Read thread leaked after disconnect()")
+        self.assertFalse(dispatch_thread.is_alive(), "Dispatcher thread leaked after disconnect()")
+        self.assertIsNone(bridge._engine._read_thread)
 
-    def test_stop_without_start_is_safe(self):
-        """stop() must be a safe no-op even if start() was never called."""
-        client = _ClientServer(address="unix:///tmp/never-exists.sock")
-        client.stop()  # Must not raise or block
-        self.assertIsNone(client._read_thread)
+    def test_disconnect_without_connect_is_safe(self):
+        """disconnect() must be a safe no-op even if connect() was never called."""
+        bridge = Bridge("unix:///tmp/never-exists.sock")
+        bridge.disconnect()  # Must not raise or block
+        self.assertIsNone(bridge._engine._read_thread)
 
-    def test_context_manager_starts_and_stops(self):
-        """The worker can be used as a context manager that starts on enter and stops on exit."""
-        client = _ClientServer(address="unix:///tmp/never-exists.sock")
+    def test_context_manager_connects_and_disconnects(self):
+        """The bridge can be used as a context manager that connects on enter and disconnects on exit."""
+        bridge = Bridge("unix:///tmp/never-exists.sock")
 
         # Avoid real connecting/looping
         with (
-            patch.object(_ClientServer, "_connect"),
-            patch.object(_ClientServer, "_conn_manager", lambda self: self._stop_event.wait()),
+            patch.object(_BridgeEngine, "_connect"),
+            patch.object(_BridgeEngine, "_conn_manager", lambda self: self._stop_event.wait()),
         ):
-            with client as entered:
-                self.assertIs(entered, client)
-                self.assertTrue(client._read_thread.is_alive())
+            with bridge as entered:
+                self.assertIs(entered, bridge)
+                self.assertTrue(bridge._engine._read_thread.is_alive())
 
-        self.assertTrue(client._stop_event.is_set())
-        self.assertFalse(client._read_thread is not None and client._read_thread.is_alive())
+        self.assertTrue(bridge._engine._stop_event.is_set())
+        read_thread = bridge._engine._read_thread
+        self.assertFalse(read_thread is not None and read_thread.is_alive())
 
-    def test_start_is_idempotent(self):
-        """Calling start() twice does not spawn a second background thread."""
+    def test_connect_is_idempotent(self):
+        """Calling connect() twice does not spawn a second set of background threads."""
         with (
-            patch.object(_ClientServer, "_connect"),
-            patch.object(_ClientServer, "_conn_manager", lambda self: self._stop_event.wait()),
+            patch.object(_BridgeEngine, "_connect"),
+            patch.object(_BridgeEngine, "_conn_manager", lambda self: self._stop_event.wait()),
         ):
-            client = _ClientServer(address="unix:///tmp/never-exists.sock")
-            client.start()
-            first_thread = client._read_thread
-            client.start()  # idempotent
-            self.assertIs(client._read_thread, first_thread)
-            client.stop()
+            bridge = Bridge("unix:///tmp/never-exists.sock")
+            bridge.connect()
+            first_thread = bridge._engine._read_thread
+            bridge.connect()  # idempotent
+            self.assertIs(bridge._engine._read_thread, first_thread)
+            bridge.disconnect()
+
+    def test_reconnect_after_disconnect(self):
+        """A disconnected bridge can connect again and reach the router from scratch."""
+        sock_path = self._start_dummy_server(accept_count=2)
+
+        bridge = Bridge(f"unix://{sock_path}")
+        self.addCleanup(bridge.disconnect)
+
+        bridge.connect()
+        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
+        bridge.disconnect()
+        self.assertFalse(bridge.wait_connected(timeout=0.1))
+
+        bridge.connect()
+        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not reconnect after restart")

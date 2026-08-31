@@ -52,7 +52,10 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    # The PYPI_API_TOKEN secret is scoped to this environment, not the whole repo
+    permissions:
+      # Needed for PyPI trusted publishing (OIDC)
+      id-token: write
+    # The trusted publisher on PyPI is bound to this environment
     environment:
       name: pypi
       url: https://pypi.org/p/arduino-router-bridge
@@ -65,7 +68,4 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          # Attestations require trusted publishing (OIDC); disable to avoid warnings
-          attestations: false
           print-hash: true

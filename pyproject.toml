@@ -8,10 +8,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arduino-router-bridge"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
-  { name="Marco Colombo", email="m.colombo@arduino.cc" },
   { name="Roberto Gazia", email="r.gazia@arduino.cc" },
+  { name="Marco Colombo", email="m.colombo@arduino.cc" },
 ]
 description = "MessagePack-RPC bridge between Python apps and Arduino microcontrollers"
 readme = "README.md"
