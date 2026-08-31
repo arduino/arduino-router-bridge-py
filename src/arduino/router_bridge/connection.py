@@ -4,6 +4,7 @@
 
 import logging
 import queue
+import select
 import socket
 import threading
 from urllib.parse import urlparse
@@ -118,6 +119,8 @@ class BridgeConnection:
         thread = self._read_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=_reconnect_delay + 1.0)
+            if thread.is_alive():
+                logger.warning("Background thread did not terminate in time.")
         self._read_thread = None
 
         self._fail_pending_callbacks(ConnectionError("Bridge connection stopped."))
@@ -180,6 +183,9 @@ class BridgeConnection:
             (success, response) = resp_queue.get(timeout=timeout)
             if success:
                 return response
+            elif isinstance(response, Exception):
+                # The connection dropped or was stopped while the request was pending
+                raise ConnectionError(f"Request '{method_name}' failed: {response}") from response
             else:
                 err_code, err_msg = response
                 raise ValueError(f"Request '{method_name}' failed: {err_msg} ({err_code})")
@@ -258,6 +264,8 @@ class BridgeConnection:
         if self._is_connected():
             return
 
+        self._is_connected_flag.clear()
+
         if self._conn:
             with self._conn_lock:
                 # We're in a dirty state since we have a valid _conn object but looks like we're not connected.
@@ -267,8 +275,6 @@ class BridgeConnection:
                 except Exception:
                     pass
                 self._conn = None
-
-        self._is_connected_flag.clear()
 
         while not self._is_connected():
             if self._stop_event.is_set():
@@ -307,17 +313,20 @@ class BridgeConnection:
         """Performs a lightweight check to verify if the connection is usable and active.
         Takes care to not block or remove bytes from the buffer.
         """
-        if self._conn is None:
+        conn = self._conn
+        if conn is None:
             return False
 
         try:
-            # Make sure we don't block or remove bytes from the buffer (peek only)
-            data = self._conn.recv(8, socket.MSG_DONTWAIT | socket.MSG_PEEK)
+            readable, _, _ = select.select([conn], [], [], 0)
+            if not readable:
+                return True  # Socket is open and reading from it would block
+            # Make sure we don't remove bytes from the buffer (peek only); recv won't
+            # block since select reported the socket as readable
+            data = conn.recv(8, socket.MSG_PEEK)
             if len(data) == 0:
                 return False
             return True
-        except BlockingIOError:
-            return True  # Socket is open and reading from it would block
         except ConnectionResetError as e:
             logger.warning(f"Connection reset in connection loop: {e}")
             return False  # Socket was closed for some other reason
@@ -326,12 +335,16 @@ class BridgeConnection:
             return False  # Assume the socket is broken for any other exception
 
     def _read_loop(self):
-        """The core loop that reads and processes messages from the active socket."""
+        """The core loop that reads and processes messages from the active socket.
+        Returns when the connection is lost or stop is requested. Reconnection is
+        handled by the caller.
+        """
+        conn = self._conn
         unpacker = msgpack.Unpacker()
         try:
             while not self._stop_event.is_set():
                 try:
-                    data = self._conn.recv(4096)
+                    data = conn.recv(4096)
                     if not data:
                         logger.info("Connection closed by router")
                         break
@@ -345,7 +358,7 @@ class BridgeConnection:
                     if self._stop_event.is_set():
                         break
                     logger.error(f"Unexpected error in read loop: {e}")
-                    continue
+                    break
         finally:
             # Connection was lost unexpectedly but we were meant to be running, tell the user
             self._fail_pending_callbacks(ConnectionError("Connection to router lost."))

@@ -27,6 +27,38 @@ class TestErrors(UnitTest):
         on_error_2.assert_called_once_with(reason)
         self.assertEqual(len(client.callbacks), 0)
 
+    def test_call_pending_during_connection_loss_raises_connection_error(self):
+        """Test that a call pending while the connection drops raises a ConnectionError."""
+        client = ClientServer()
+        client._send_bytes = MagicMock()
+
+        def side_effect(*args, **kwargs):
+            # Simulate the connection dropping right after the request is sent
+            client._fail_pending_callbacks(ConnectionError("Connection to router lost."))
+
+        client._send_bytes.side_effect = side_effect
+
+        with self.assertRaises(ConnectionError) as cm:
+            client.call("test_method", timeout=1)
+
+        self.assertIn("Connection to router lost", str(cm.exception))
+        self.assertEqual(len(client.callbacks), 0)
+
+    def test_call_pending_during_stop_raises_connection_error(self):
+        """Test that a call pending while the bridge is stopped raises a ConnectionError."""
+        client = ClientServer()
+        client._send_bytes = MagicMock()
+
+        def side_effect(*args, **kwargs):
+            client.stop()  # stop() fails all pending callbacks
+
+        client._send_bytes.side_effect = side_effect
+
+        with self.assertRaises(ConnectionError) as cm:
+            client.call("test_method", timeout=1)
+
+        self.assertIn("stopped", str(cm.exception))
+
     def test_call_timeout(self):
         """Test that an RPC call raises a TimeoutError if no response is received."""
         client = ClientServer()

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `set_address_resolver`: bind the default address directly with `Bridge.connect(address)` instead; explicit `address` arguments are no longer remapped.
 - `set_logger`: attach a handler or set a level on the `arduino.router_bridge` logger namespace instead.
 
+### Fixed
+
+- Calls pending when the connection drops or the bridge is stopped now raise a `ConnectionError` instead of an internal `TypeError`.
+- The read loop no longer spins at full CPU on unexpected socket errors: any read error now triggers a reconnection.
+- The connection status check no longer relies on `MSG_DONTWAIT`, which is unavailable on Windows.
+- The connected flag is cleared before a broken connection is torn down, so concurrent sends can no longer observe a connected state without a usable socket.
+
 ## [0.1.0] - 2026-08-31
 
 ### Added

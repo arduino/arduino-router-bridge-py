@@ -127,6 +127,31 @@ class TestIntegration(unittest.TestCase):
         result = client.call("get_value")
         self.assertEqual(result, "success!")
 
+    def test_call_pending_when_router_disconnects(self):
+        """Tests that a pending call raises ConnectionError when the router drops the connection."""
+        server_ready = threading.Event()
+
+        def server_logic():
+            server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_sock.bind(self.socket_path)
+            server_sock.listen(1)
+            server_ready.set()
+            conn, _ = server_sock.accept()
+            conn.recv(1024)  # Wait for the request, then drop the connection without replying
+            conn.close()
+            self.stop_server.wait()
+            server_sock.close()
+
+        self.server_thread = threading.Thread(target=server_logic, daemon=True)
+        self.server_thread.start()
+        self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
+
+        client = ClientServer(address=f"unix://{self.socket_path}")
+        client.wait_connected(timeout=2)
+
+        with self.assertRaises(ConnectionError):
+            client.call("some_method", timeout=5)
+
     def test_provide(self):
         """Tests that ClientServer.provide makes a function callable by the server."""
         server_ready = threading.Event()

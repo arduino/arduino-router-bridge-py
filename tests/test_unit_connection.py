@@ -58,3 +58,83 @@ class TestConnection(UnitTest):
             client._connect()
 
         client.call.assert_called_once_with("$/register", "early_handler")
+
+    def test_read_loop_exits_on_unexpected_error(self):
+        """The read loop must bail out on unexpected socket errors instead of spinning forever."""
+        client = ClientServer()
+        client._conn = MagicMock()
+        client._conn.recv.side_effect = OSError("Bad file descriptor")
+
+        client._read_loop()  # Must return, handing control back to the connection manager
+
+        client._conn.recv.assert_called_once()  # No retry on the dead socket
+
+    def test_read_loop_fails_pending_callbacks_on_exit(self):
+        """The read loop must fail pending requests when the connection is lost."""
+        client = ClientServer()
+        client._conn = MagicMock()
+        client._conn.recv.return_value = b""  # Orderly shutdown by the router
+
+        on_error = MagicMock()
+        client.callbacks[1] = (None, on_error)
+
+        client._read_loop()
+
+        on_error.assert_called_once()
+        self.assertIsInstance(on_error.call_args[0][0], ConnectionError)
+        self.assertEqual(len(client.callbacks), 0)
+
+    def test_connect_clears_connected_flag_before_cleanup(self):
+        """_connect must signal disconnection before tearing down a dirty connection,
+        so senders never see a set flag with a broken connection."""
+        client = ClientServer()
+        self.connect_client(client)
+
+        # Make the connection look broken while the flag is still set
+        dirty_conn = MagicMock()
+        client._conn = dirty_conn
+
+        flag_when_closed = []
+        dirty_conn.close.side_effect = lambda: flag_when_closed.append(client._is_connected_flag.is_set())
+
+        with patch.object(client, "_is_connected", side_effect=[False, False]):
+            client._connect()
+
+        self.assertEqual(flag_when_closed, [False])
+
+
+class TestIsConnected(UnitTest):
+    def test_no_connection_object(self):
+        """_is_connected must be False when there is no connection object."""
+        client = ClientServer()
+        self.assertFalse(client._is_connected())
+
+    def test_open_idle_socket(self):
+        """_is_connected must be True when the socket is open with nothing to read."""
+        client = ClientServer()
+        client._conn = MagicMock()
+        with patch("arduino.router_bridge.connection.select.select", return_value=([], [], [])):
+            self.assertTrue(client._is_connected())
+
+    def test_peer_closed_socket(self):
+        """_is_connected must be False when the peer performed an orderly shutdown."""
+        client = ClientServer()
+        client._conn = MagicMock()
+        client._conn.recv.return_value = b""
+        with patch("arduino.router_bridge.connection.select.select", return_value=([client._conn], [], [])):
+            self.assertFalse(client._is_connected())
+
+    def test_readable_socket_with_data(self):
+        """_is_connected must be True when the socket has pending data."""
+        client = ClientServer()
+        client._conn = MagicMock()
+        client._conn.recv.return_value = b"data"
+        with patch("arduino.router_bridge.connection.select.select", return_value=([client._conn], [], [])):
+            self.assertTrue(client._is_connected())
+
+    def test_broken_socket(self):
+        """_is_connected must be False when the socket errors out."""
+        client = ClientServer()
+        client._conn = MagicMock()
+        with patch("arduino.router_bridge.connection.select.select", side_effect=OSError("Bad file descriptor")):
+            self.assertFalse(client._is_connected())
