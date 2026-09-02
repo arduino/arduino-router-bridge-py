@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import msgpack
 
 from arduino.router_bridge import Bridge
-from arduino.router_bridge.connection import BUFFER_LIMIT_EXCEEDED_ERR, GENERIC_ERR
+from arduino.router_bridge.protocol import BUFFER_LIMIT_EXCEEDED_ERR, GENERIC_ERR
 
 
 class TestIntegration(unittest.TestCase):

@@ -18,9 +18,10 @@ class TestLifecycle(unittest.TestCase):
     """Lifecycle tests for the bridge, using real threads."""
 
     def setUp(self):
-        self.logger_patcher = patch("arduino.router_bridge.connection.logger", MagicMock())
-        self.logger_patcher.start()
-        self.addCleanup(self.logger_patcher.stop)
+        for module in ("connection", "dispatch", "transport"):
+            patcher = patch(f"arduino.router_bridge.{module}.logger", MagicMock())
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _start_dummy_server(self, accept_count=1):
         """Starts a Unix-socket server that accepts the given number of connections and holds them open."""
@@ -63,7 +64,7 @@ class TestLifecycle(unittest.TestCase):
         bridge.connect()
         self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
         read_thread = bridge._connection._read_thread
-        dispatch_thread = bridge._connection._dispatch_thread
+        dispatch_thread = bridge._connection._dispatcher._thread
         self.assertTrue(read_thread.is_alive())
         self.assertTrue(dispatch_thread.is_alive())
 
@@ -82,7 +83,7 @@ class TestLifecycle(unittest.TestCase):
         self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
         connection = bridge._connection  # Outlives the handle so we can observe the wind-down
         read_thread = connection._read_thread
-        dispatch_thread = connection._dispatch_thread
+        dispatch_thread = connection._dispatcher._thread
 
         del bridge
         gc.collect()  # Fires the finalizer; must not block on a thread join

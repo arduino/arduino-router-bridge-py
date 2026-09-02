@@ -2,207 +2,112 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+"""Connection lifecycle behind the public Bridge facade: composes a Transport, a
+PendingCalls registry and a Dispatcher into the reconnect/read loops and message routing."""
+
 import logging
 import queue
-import select
-import socket
 import threading
-import weakref
-from urllib.parse import urlparse
 
 import msgpack
 
-# Library logger: silent unless the application configures the "arduino.router_bridge" namespace
+from . import protocol
+from .dispatch import Dispatcher
+from .pending import PendingCalls
+from .transport import DEFAULT_ADDRESS, Transport, parse_address
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_ADDRESS = "unix:///var/run/arduino-router.sock"
-
 _reconnect_delay = 3.0  # seconds
-_send_timeout = 15.0  # seconds; bounds a blocking send so a stalled peer cannot block the send path
 
-# TCP keepalive detects a half-open connection (peer vanished without FIN). SO_KEEPALIVE is portable;
-# the timers below are Linux-only and skipped elsewhere, where the OS default idle still applies.
-_keepalive_idle = 10  # seconds idle before the first probe
-_keepalive_interval = 5  # seconds between probes
-_keepalive_count = 3  # unanswered probes before the connection is considered dead
-
-# Error codes for RPC messages received from the RPC router. These are defined in the RPC router itself.
-ROUTE_ALREADY_EXISTS_ERR = 0x05
-BUFFER_LIMIT_EXCEEDED_ERR = 0x06
-
-# Error codes for RPC messages sent to Arduino_RouterBridge. These are defined in the lib itself.
-MALFORMED_CALL_ERR = 0xFD
-FUNCTION_NOT_FOUND_ERR = 0xFE
-GENERIC_ERR = 0xFF
+__all__ = ["DEFAULT_ADDRESS", "_BridgeConnection"]
 
 
 class _BridgeConnection:
-    """Internal connection behind a `Bridge`: owns the socket, the background read/reconnect
-    thread and the handler dispatcher.
+    """Internal connection manager: owns the transport, the background read/reconnect thread and the dispatching.
 
-    The background threads reference this connection, never the public `Bridge` handle,
-    so an unreachable handle can be garbage collected and stop it.
+    The background threads never reference this connection, so an unreachable handle can be garbage collected.
     """
 
     def __init__(
         self, address: str = DEFAULT_ADDRESS, max_message_size: int = 1024 * 1024, max_pending_handlers: int = 1024
     ):
-        """Creates a connection for the given router address without connecting.
-
-        Args:
-            address (str): The router address, either "unix://<path>" or "tcp://<host>:<port>".
-            max_message_size (int): Maximum size in bytes of a single incoming message; the
-                connection is dropped and re-established when the peer exceeds it. Defaults to 1 MiB.
-            max_pending_handlers (int): Maximum number of queued handler executions; further
-                requests are rejected as busy and further notifications dropped. Also bounds memory:
-                at most this many queued messages, each up to max_message_size. Defaults to 1024.
-
-        Raises:
-            ValueError: If the address scheme is not supported, the address is incomplete, or
-                unix:// is used on a platform without unix socket support.
-        """
+        """Creates a connection without connecting; see ``Bridge`` for the parameters."""
         self.address = address
-        urlparsed = urlparse(address)
-        if urlparsed.scheme == "unix":
-            if not hasattr(socket, "AF_UNIX"):
-                raise ValueError(
-                    f"Invalid address '{address}': unix:// sockets are not supported on this platform. "
-                    "The router runs on the Linux board; use tcp:// only for development."
-                )
-            if not urlparsed.path:
-                raise ValueError(f"Invalid unix address '{address}': expected unix://<path>.")
-            self.socket_type = "unix"
-            self._peer_addr = urlparsed.path
-        elif urlparsed.scheme == "tcp":
-            try:
-                port = urlparsed.port
-            except ValueError as e:
-                raise ValueError(f"Invalid tcp address '{address}': {e}") from e
-            if not urlparsed.hostname or not port:
-                raise ValueError(f"Invalid tcp address '{address}': expected tcp://<host>:<port>.")
-            self.socket_type = "tcp"
-            self._peer_addr = (urlparsed.hostname, port)
-        else:
-            raise ValueError(
-                f"Unsupported scheme '{urlparsed.scheme}' in address '{address}': "
-                "expected unix://<path> or tcp://<host>:<port>."
-            )
-
+        self._socket_type, self._peer_addr = parse_address(address)
         self._max_message_size = max_message_size
-        self._max_pending_handlers = max_pending_handlers
 
-        self.next_msgid = 0  # Guarded by callbacks_lock
-        self.callbacks = {}  # msgid -> (on_result, on_error)
-        self.callbacks_lock = threading.Lock()
-        self.handlers = {}  # method name -> function
-        self.handlers_lock = threading.Lock()
+        self._pending = PendingCalls()
+        self._dispatcher = Dispatcher(max_pending_handlers, self._send_response)
 
-        self._conn = None
-        self._conn_lock = threading.Lock()  # Guards the _conn reference only
-        self._send_lock = threading.Lock()  # Serializes socket writes
+        self._transport = None
+        self._transport_lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()  # Serializes start()/stop()
         self._is_connected_flag = threading.Event()  # This avoids locking recv calls
         self._stop_event = threading.Event()
         self._read_thread = None
-        self._dispatch_queue = queue.Queue(maxsize=max_pending_handlers)
-        self._dispatch_thread = None
 
     def start(self):
-        """Starts the background loop that connects to the router and keeps the
-        connection alive. Returns immediately: the connection is established in the
-        background and retried until it succeeds (see ``wait_connected``).
-        A no-op if the background loop is already running.
-        """
+        """Starts the background loops; returns immediately, connecting and retrying in the background."""
         with self._lifecycle_lock:
             if self._read_thread is not None and self._read_thread.is_alive():
                 return
             self._stop_event.clear()
-            # Fresh queue: items and stop sentinels from a previous run must not leak into this one
-            self._dispatch_queue = queue.Queue(maxsize=self._max_pending_handlers)
-            self._dispatch_thread = threading.Thread(
-                target=self._dispatch_loop, args=(self._dispatch_queue,), name="Bridge.dispatch_loop", daemon=True
-            )
-            self._dispatch_thread.start()
+            self._dispatcher.start()
             self._read_thread = threading.Thread(target=self._conn_manager, name="Bridge.read_loop", daemon=True)
             self._read_thread.start()
 
     def stop(self):
-        """Stops the background loops, closes the connection and releases resources.
-        Idempotent and safe to call even if ``start()`` was never called. Blocks briefly
-        while the background threads wind down; use ``_signal_stop`` from contexts that
-        must not block, such as a finalizer.
+        """Stops the background loops and closes the connection. Idempotent; blocks briefly while
+        the threads wind down, so contexts that must not block use ``_signal_stop`` instead.
         """
         with self._lifecycle_lock:
             self._signal_stop()
 
-            current = threading.current_thread()
-            for thread in (self._read_thread, self._dispatch_thread):
-                if thread is not None and thread is not current:
-                    thread.join(timeout=_reconnect_delay + 1.0)
-                    if thread.is_alive():
-                        logger.warning(f"Background thread '{thread.name}' did not terminate in time.")
+            if self._read_thread is not None and self._read_thread is not threading.current_thread():
+                self._read_thread.join(timeout=_reconnect_delay + 1.0)
+                if self._read_thread.is_alive():
+                    logger.warning(f"Background thread '{self._read_thread.name}' did not terminate in time.")
             self._read_thread = None
-            self._dispatch_thread = None
+            self._dispatcher.join(timeout=_reconnect_delay + 1.0)
 
-        self._fail_pending_callbacks(ConnectionError("Bridge connection stopped."))
+        self._pending.fail_all(ConnectionError("Bridge connection stopped."))
 
     def _signal_stop(self):
-        """Signals the background loops to exit and tears down the socket without waiting.
-        Never blocks, so it is safe to run from a weakref finalizer or at interpreter exit:
-        the daemon threads notice the stop event and wind down on their own.
+        """Signals the loops to exit and tears down the transport. Never blocks, so it is safe
+        from a weakref finalizer: the daemon threads notice the stop event on their own.
         """
         self._stop_event.set()
         self._is_connected_flag.clear()
 
-        # Shutdown wakes a blocked recv()/send(); _conn_lock is never held during those, so this cannot deadlock
-        with self._conn_lock:
-            if self._conn is not None:
-                try:
-                    self._conn.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass  # Already disconnected
-                try:
-                    self._conn.close()  # Release resources
-                except Exception:
-                    pass
-                self._conn = None
+        # close() wakes a blocked recv()/send(); _transport_lock is never held during those, so this cannot deadlock
+        with self._transport_lock:
+            transport = self._transport
+            self._transport = None
+        if transport is not None:
+            transport.close()
 
-        try:
-            self._dispatch_queue.put_nowait(None)  # Wake the dispatcher so it can exit
-        except queue.Full:
-            pass  # The dispatcher is draining items and will notice the stop event by itself
+        self._dispatcher.signal_stop()
 
     def wait_connected(self, timeout: float | None = None) -> bool:
-        """Waits until the connection to the router is established.
-
-        Args:
-            timeout (float, optional): Maximum time to wait in seconds. Waits indefinitely if None.
-
-        Returns:
-            bool: True if connected, False if the timeout expired first.
-        """
+        """Waits until connected: True if connected, False if the timeout expired first."""
         return self._is_connected_flag.wait(timeout)
 
     def notify(self, method_name: str, *params):
-        """Sends a notification to the server without waiting for a response.
-        Best-effort: never blocks waiting for a connection, the notification is
-        dropped if the router is not connected.
-        """
-        request = [2, method_name, params]
+        """Sends a notification, best-effort: never waits for a connection, dropped if disconnected."""
         try:
-            self._send_bytes(msgpack.packb(request), wait_for_connection=False)
+            self._send_bytes(protocol.pack_notification(method_name, params), wait_for_connection=False)
         except ConnectionError:
             logger.debug(f"Dropped notification for method '{method_name}': not connected.")
         except Exception as e:
             logger.error(f"Failed to send notification for method '{method_name}': {e}")
 
     def call(self, method_name: str, *params, timeout: float | None = 10):
-        """Calls a method on the server and waits for a response.
-        Waits indefinitely if timeout is None.
-        Raises RuntimeError when invoked from a provided handler: the peer may be blocked
-        waiting for the handler's own response, so nested calls risk deadlocks and request loops.
+        """Calls a method and waits for its response (indefinitely if timeout is None).
+        Rejected on the dispatcher thread: the peer may be blocked waiting for the handler's
+        own response, so nested calls risk deadlocks and request loops.
         """
-        if threading.current_thread() is self._dispatch_thread:
+        if self._dispatcher.on_dispatch_thread():
             raise RuntimeError(
                 f"Cannot call '{method_name}' from a provided handler: nested bridge calls are not supported. "
                 "Use notify for fire-and-forget messages."
@@ -216,18 +121,12 @@ class _BridgeConnection:
         def on_error(error):
             resp_queue.put((False, error))
 
-        # Reserve the message ID and register the callbacks atomically
-        with self.callbacks_lock:
-            msgid = self._next_msgid_locked()
-            self.callbacks[msgid] = (on_result, on_error)
-
-        request = [0, msgid, method_name, params]
+        msgid = self._pending.register(on_result, on_error)
 
         try:
-            self._send_bytes(msgpack.packb(request))
+            self._send_bytes(protocol.pack_request(msgid, method_name, params))
         except Exception as e:
-            with self.callbacks_lock:
-                self.callbacks.pop(msgid, None)
+            self._pending.pop(msgid)
             raise RuntimeError(f"Failed to call method '{method_name}': {e}") from e
 
         try:
@@ -242,50 +141,36 @@ class _BridgeConnection:
                 raise ValueError(f"Request '{method_name}' failed: {err_msg} ({err_code})")
         except queue.Empty:
             # Timed out waiting for response
-            with self.callbacks_lock:
-                pending = self.callbacks.pop(msgid, None)
-            if pending:
-                # Best-effort cancellation outside callbacks_lock: sending blocks and must not stall response dispatching
+            if self._pending.pop(msgid):
                 try:
                     self.notify("$/cancelRequest", msgid)
                 except Exception:
                     pass
             raise TimeoutError(f"Request '{method_name}' timed out after {timeout}s")
         except Exception:
-            with self.callbacks_lock:  # Ensure callback is cleaned up on any exception path
-                self.callbacks.pop(msgid, None)
+            self._pending.pop(msgid)  # Ensure the pending entry is cleaned up on any exception path
             raise
 
     def provide(self, method_name: str, handler):
-        """Makes a method available to the microcontroller, so it can call it remotely.
-        The handler should be a callable that can take arguments.
-
-        Registration is declarative: the handler is recorded immediately and registered
-        with the router as soon as a connection is available, then re-registered
-        transparently on every reconnection. Registration failures are logged.
+        """Records the handler and registers it with the router once connected,
+        re-registering transparently on every reconnection.
         """
-        if not callable(handler):
-            raise ValueError("Handler must be a callable.")
-
-        with self.handlers_lock:
-            self.handlers[method_name] = handler
+        self._dispatcher.add(method_name, handler)
 
         if self._is_connected_flag.is_set():
             self._register_with_router("$/register", method_name)
 
     def unprovide(self, method_name: str):
-        """Makes a method no more available to the microcontroller."""
-        with self.handlers_lock:
-            removed = self.handlers.pop(method_name, None)
-        if removed is None:
+        """Removes the handler and unregisters it from the router."""
+        if self._dispatcher.remove(method_name) is None:
             return  # Nothing to unregister
 
         if self._is_connected_flag.is_set():
             self._register_with_router("$/unregister", method_name)
 
     def _register_with_router(self, rpc_method: str, method_name: str):
-        """Sends a registration call for the method, logging failures. Runs it in a background
-        thread when invoked from a provided handler, since handlers must not block on calls.
+        """Sends a registration call, in a background thread when invoked from a provided
+        handler: handlers must not block on calls.
         """
 
         def do_call():
@@ -294,47 +179,13 @@ class _BridgeConnection:
             except Exception as e:
                 logger.error(f"Failed to send '{rpc_method}' for method '{method_name}': {e}")
 
-        if threading.current_thread() is self._dispatch_thread:
+        if self._dispatcher.on_dispatch_thread():
             threading.Thread(target=do_call, name="Bridge.registration", daemon=True).start()
         else:
             do_call()
 
-    def _next_msgid_locked(self):
-        """Returns the next message ID not in use by a pending request, within bounds.
-        Must be called while holding callbacks_lock.
-        """
-        self.next_msgid = (self.next_msgid + 1) % (2**32)
-        while self.next_msgid in self.callbacks:
-            self.next_msgid = (self.next_msgid + 1) % (2**32)
-        return self.next_msgid
-
-    def _dispatch_loop(self, dispatch_queue):
-        """Runs incoming request/notification handlers off the read thread, so slow
-        handlers cannot stall message processing.
-        Exits when the stop sentinel (None) is received.
-        """
-        while True:
-            item = dispatch_queue.get()
-            if item is None or self._stop_event.is_set():
-                return
-            self._run_handler(*item)
-
-    def _run_handler(self, handler, method_name, msgid, params):
-        """Executes a user-provided handler, replying to the router when msgid identifies a request.
-        Handler exceptions are reported to the peer by exception type only; full details stay in the local log.
-        """
-        try:
-            result = handler(*params)
-            if msgid is not None:
-                self._send_response(msgid, None, result)
-        except Exception as e:
-            logger.error(f"Failed to run user-provided handler for method '{method_name}': {e}", exc_info=True)
-            if msgid is not None:
-                err_code = MALFORMED_CALL_ERR if isinstance(e, (TypeError, ValueError)) else GENERIC_ERR
-                self._send_response(msgid, [err_code, f"Unhandled {type(e).__name__} in handler"], None)
-
     def _conn_manager(self):
-        """Manages connection and reconnection attempts. Once the connection is established, delegates to the read loop."""
+        """Alternates between connecting to the router and running the read loop, until stopped."""
         while not self._stop_event.is_set():
             # Ensure we're connected to the router
             self._connect()  # This retries internally until connected or stop() is requested
@@ -346,151 +197,85 @@ class _BridgeConnection:
             self._stop_event.wait(_reconnect_delay)
 
     def _connect(self):
-        """Makes sure we're connected to the router by retrying periodically until we have a clean connection.
-        This method **must be** the only one allowed to set _is_connected_flag, this allows us to use a
-        lockless algorithm for connection management, in particular for recv calls.
+        """Retries periodically until we have a clean connection. This method **must be** the only
+        one allowed to set _is_connected_flag: that keeps the recv path lockless.
         """
-        if self._is_connected():
+        transport = self._transport
+        if transport is not None and transport.is_alive():
             return
 
         self._is_connected_flag.clear()
 
-        if self._conn:
-            with self._conn_lock:
-                # Dirty state: we have a _conn object but we're not connected, drop the broken connection object
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-                self._conn = None
+        if transport is not None:
+            # Dirty state: we have a transport but it is not usable, drop it
+            with self._transport_lock:
+                if self._transport is transport:
+                    self._transport = None
+            transport.close()
 
-        while not self._is_connected():
-            if self._stop_event.is_set():
-                return
+        while not self._stop_event.is_set():
             try:
-                if self.socket_type == "unix":
-                    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    conn.connect(self._peer_addr)
-                else:
-                    host, port = self._peer_addr
-                    conn = socket.create_connection((host, port), timeout=5)
-                conn.settimeout(None)  # Set blocking recv
-                if self.socket_type == "tcp":
-                    self._configure_tcp_keepalive(conn)
-
-                with self._conn_lock:
-                    self._conn = conn
-                self._is_connected_flag.set()
-
-                if self._stop_event.is_set():
-                    # stop() may have run before the connection was published: undo and bail out
-                    self._is_connected_flag.clear()
-                    with self._conn_lock:
-                        self._conn = None
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    return
-
-                # Register in a separate thread: each call blocks for a response that arrives once the read loop runs
-                def register_methods_on_connect():
-                    with self.handlers_lock:
-                        methods = list(self.handlers.keys())
-                    for method in methods:
-                        try:
-                            self.call("$/register", method)
-                        except Exception as e:
-                            logger.error(f"Failed to register method '{method}' after connection: {e}")
-
-                if self.handlers:
-                    t = threading.Thread(
-                        target=register_methods_on_connect, name="Bridge.register_methods_on_connect", daemon=True
-                    )
-                    t.start()
-
-                return
+                transport = Transport.connect(self._socket_type, self._peer_addr)
             except Exception as e:
                 logger.error(f"Failed to connect to router: {e}")
                 self._stop_event.wait(_reconnect_delay)
+                continue
 
-    def _is_connected(self) -> bool:
-        """Performs a lightweight check to verify if the connection is usable and active.
-        Takes care to not block or remove bytes from the buffer.
-        """
-        conn = self._conn
-        if conn is None:
-            return False
+            with self._transport_lock:
+                self._transport = transport
+            self._is_connected_flag.set()
 
-        try:
-            readable, _, _ = select.select([conn], [], [], 0)
-            if not readable:
-                return True  # Socket is open and reading from it would block
-            # Peek without consuming buffered bytes; select guarantees this recv won't block
-            data = conn.recv(8, socket.MSG_PEEK)
-            if len(data) == 0:
-                return False
-            return True
-        except ConnectionResetError as e:
-            logger.warning(f"Connection reset in connection loop: {e}")
-            return False  # Socket was closed for some other reason
-        except Exception as e:
-            logger.error(f"Unexpected error while checking socket status: {e}")
-            return False  # Assume the socket is broken for any other exception
+            if self._stop_event.is_set():
+                # stop() may have run before the transport was published: undo and bail out
+                self._is_connected_flag.clear()
+                with self._transport_lock:
+                    self._transport = None
+                transport.close()
+                return
 
-    def _configure_tcp_keepalive(self, conn):
-        """Enables keepalive on a TCP socket so a half-open connection is detected instead of
-        appearing healthy forever. The timers are tuned on Linux; macOS and Windows are
-        development-only and keep the OS defaults.
-        """
-        try:
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        except OSError as e:
-            logger.debug(f"Could not enable SO_KEEPALIVE: {e}")
+            self._register_provided_methods()
             return
 
-        for optname, value in (
-            ("TCP_KEEPIDLE", _keepalive_idle),
-            ("TCP_KEEPINTVL", _keepalive_interval),
-            ("TCP_KEEPCNT", _keepalive_count),
-        ):
-            opt = getattr(socket, optname, None)
-            if opt is None:
-                continue  # Linux-only knob; other platforms keep the OS default
-            try:
-                conn.setsockopt(socket.IPPROTO_TCP, opt, value)
-            except OSError as e:
-                logger.debug(f"Could not set {optname}: {e}")
+    def _register_provided_methods(self):
+        """Registers all provided methods after a (re)connection, in a separate thread:
+        each call blocks for a response that only arrives once the read loop runs.
+        """
+        methods = self._dispatcher.method_names()
+        if not methods:
+            return
 
-    def _drop_connection(self, conn):
-        """Forces the given connection down so _conn_manager reconnects and resyncs the stream.
-        Safe to call from any thread and idempotent: a no-op once conn has been replaced.
+        def register():
+            for method in methods:
+                try:
+                    self.call("$/register", method)
+                except Exception as e:
+                    logger.error(f"Failed to register method '{method}' after connection: {e}")
+
+        threading.Thread(target=register, name="Bridge.register_methods_on_connect", daemon=True).start()
+
+    def _drop_transport(self, transport):
+        """Forces the given transport down so _conn_manager reconnects and resyncs the stream.
+        Safe from any thread; a no-op once the transport has been replaced.
         """
         self._is_connected_flag.clear()
-        with self._conn_lock:
-            if self._conn is not conn or conn is None:
-                return  # Already replaced by a newer connection or dropped
-            try:
-                conn.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass  # Already disconnected
-            try:
-                conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        with self._transport_lock:
+            if transport is None or self._transport is not transport:
+                return  # Already replaced by a newer transport or dropped
+            self._transport = None
+        transport.close()
 
     def _read_loop(self):
-        """The core loop that reads and processes messages from the active socket.
-        Returns when the connection is lost or stop is requested. Reconnection is
-        handled by the caller.
+        """Reads and processes messages until the connection is lost or stop is requested;
+        reconnection is the caller's job.
         """
-        conn = self._conn
+        transport = self._transport
+        if transport is None:
+            return  # stop() tore the transport down before the read loop started
         unpacker = msgpack.Unpacker(max_buffer_size=self._max_message_size)
         try:
             while not self._stop_event.is_set():
                 try:
-                    data = conn.recv(4096)
+                    data = transport.recv(4096)
                     if not data:
                         logger.info("Connection closed by router")
                         break
@@ -509,90 +294,41 @@ class _BridgeConnection:
                     logger.error(f"Unexpected error in read loop: {e}")
                     break
         finally:
-            # Tear the socket down so _connect rebuilds it: on a buffer-limit or decode error the
-            # socket is still alive but the stream is desynced but _is_connected would call it healthy
-            self._drop_connection(conn)
-            self._fail_pending_callbacks(ConnectionError("Connection to router lost."))
-
-    # The arduino-router guarantees str-encoded method names; anything else is a malformed message
-    def _decode_method(self, method_name) -> str:
-        """Validates that the method name arrived as a string."""
-        if not isinstance(method_name, str):
-            raise ValueError(f"Invalid method name type: {type(method_name)}. Expected str.")
-        return method_name
+            # Tear the transport down so _connect rebuilds it: on a buffer-limit or decode error the
+            # socket is still alive but the stream is desynced, but is_alive would call it healthy
+            self._drop_transport(transport)
+            self._pending.fail_all(ConnectionError("Connection to router lost."))
 
     def _handle_msg(self, msg: list):
-        """Processes a single deserialized MessagePack-RPC message."""
+        """Routes one message: requests and notifications to the dispatcher, responses to their pending call."""
         if not msg or not isinstance(msg, list):
             logger.warning("Invalid RPC message received (must be a non-empty list).")
             return
 
         msg_type = msg[0]
         try:
-            if msg_type == 0:  # Request: [0, msgid, method, params]
-                if len(msg) != 4:
-                    raise ValueError(f"Invalid RPC request: expected length 4, got {len(msg)}")
-                _, msgid, method, params = msg
-                if not isinstance(params, (list, tuple)):
-                    raise ValueError("Invalid RPC request params: expected array or tuple")
+            if msg_type == protocol.REQUEST:
+                msgid, method_name, params = protocol.parse_request(msg)
+                handler = self._dispatcher.lookup(method_name)
+                if handler is None:
+                    self._send_response(
+                        msgid, [protocol.FUNCTION_NOT_FOUND_ERR, f"Method not found: '{method_name}'"], None
+                    )
+                elif not self._dispatcher.submit(handler, method_name, msgid, params):
+                    logger.warning(f"Handler queue full, rejecting request for method '{method_name}'")
+                    self._send_response(msgid, [protocol.GENERIC_ERR, "Server busy: too many pending requests."], None)
 
-                method_name = self._decode_method(method)
+            elif msg_type == protocol.RESPONSE:
+                msgid, error, result = protocol.parse_response(msg)
+                self._resolve_response(msgid, error, result)
 
-                with self.handlers_lock:
-                    handler = self.handlers.get(method_name)
+            elif msg_type == protocol.NOTIFICATION:
+                method_name, params = protocol.parse_notification(msg)
+                handler = self._dispatcher.lookup(method_name)
+                # msgid None marks a notification: no response, a full queue drops it
+                if handler is not None and not self._dispatcher.submit(handler, method_name, None, params):
+                    logger.warning(f"Handler queue full, dropping notification for method '{method_name}'")
 
-                if handler:
-                    try:
-                        # Hand off to the dispatcher thread: user code must not run on the read thread
-                        self._dispatch_queue.put_nowait((handler, method_name, msgid, params))
-                    except queue.Full:
-                        logger.warning(f"Handler queue full, rejecting request for method '{method_name}'")
-                        self._send_response(msgid, [GENERIC_ERR, "Server busy: too many pending requests."], None)
-                else:
-                    self._send_response(msgid, [FUNCTION_NOT_FOUND_ERR, f"Method not found: '{method_name}'"], None)
-
-            elif msg_type == 1:  # Response: [1, msgid, error, result]
-                if len(msg) != 4:
-                    raise ValueError(f"Invalid RPC response: expected length 4, got {len(msg)}")
-                _, msgid, error, result = msg
-                if error and (not isinstance(error, list) or len(error) < 2):
-                    raise ValueError("Invalid error format in RPC response")
-
-                with self.callbacks_lock:
-                    cbs = self.callbacks.pop(msgid, None)
-                if cbs:
-                    on_result, on_error = cbs
-                    if result is None and error is None:
-                        on_result(None)
-                    else:
-                        # Treat ROUTE_ALREADY_EXISTS_ERR as OK: the router already knows the method, a recoverable situation
-                        if result is not None or (error is not None and error[0] == ROUTE_ALREADY_EXISTS_ERR):
-                            on_result(result)
-                        elif error is not None:
-                            on_error(error)
-                        else:
-                            on_result([GENERIC_ERR, "Unknown error occurred."])
-                else:
-                    logger.warning(f"Response for unknown msgid {msgid} received.")
-
-            elif msg_type == 2:  # Notification: [2, method, params]
-                if len(msg) != 3:
-                    raise ValueError(f"Invalid RPC notification: expected length 3, got {len(msg)}")
-                _, method, params = msg
-                if not isinstance(params, (list, tuple)):
-                    raise ValueError("Invalid RPC notification params: expected array or tuple")
-
-                method_name = self._decode_method(method)
-
-                with self.handlers_lock:
-                    handler = self.handlers.get(method_name)
-
-                if handler:
-                    try:
-                        # Hand off to the dispatcher thread; msgid None marks a notification (no response)
-                        self._dispatch_queue.put_nowait((handler, method_name, None, params))
-                    except queue.Full:
-                        logger.warning(f"Handler queue full, dropping notification for method '{method_name}'")
             else:
                 logger.warning(f"Invalid RPC message type received: {msg_type}")
 
@@ -601,218 +337,49 @@ class _BridgeConnection:
         except Exception as e:
             logger.error(f"Unexpected error while handling message: {e}")
 
-    def _fail_pending_callbacks(self, reason: Exception):
-        """Invokes error callbacks for all pending requests and clears their callbacks."""
-        with self.callbacks_lock:
-            for _, (_, on_error) in list(self.callbacks.items()):
-                if on_error:
-                    try:
-                        on_error(reason)
-                    except Exception as e:
-                        logger.error(f"Failed to run 'on_error' callback: {e}")
-            self.callbacks.clear()
+    def _resolve_response(self, msgid: int, error: list | None, result):
+        """Completes the pending call the response belongs to, if it is still pending."""
+        pending = self._pending.pop(msgid)
+        if pending is None:
+            logger.warning(f"Response for unknown msgid {msgid} received.")
+            return
+
+        on_result, on_error = pending
+        if error is None:
+            on_result(result)
+        elif result is not None or error[0] == protocol.ROUTE_ALREADY_EXISTS_ERR:
+            # Treat ROUTE_ALREADY_EXISTS_ERR as OK: the router already knows the method, a recoverable situation.
+            on_result(result)
+        else:
+            on_error(error)
 
     def _send_response(self, msgid: int, err: list | None, response):
-        """Helper to pack and send a response message. err is None or an [err_code, err_msg] pair."""
-        msg = [1, msgid, err, response]
+        """Packs and sends a response; err is None or an [err_code, err_msg] pair."""
         try:
-            # Don't wait for a reconnection: the requester's msgid belongs to the connection that carried it
-            self._send_bytes(msgpack.packb(msg), wait_for_connection=False)
+            # Don't wait for a reconnection: the requester's msgid belongs to the connection that carried it.
+            self._send_bytes(protocol.pack_response(msgid, err, response), wait_for_connection=False)
         except ConnectionError:
             pass  # Response sending is best-effort if connection drops while handling request.
         except Exception as e:  # e.g., msgpack encoding error
             logger.error(f"Failed to pack/send response: {e}")
 
     def _send_bytes(self, packed_data: bytes, wait_for_connection: bool = True):
-        """Sends packed data, handling connection waits and errors.
-        With wait_for_connection, a disconnected bridge is given a grace period to
-        reconnect before failing; otherwise it fails immediately.
+        """Sends packed data. With wait_for_connection, a disconnected bridge is given a grace
+        period to reconnect before failing; otherwise it fails immediately.
         """
         if not self._is_connected_flag.is_set():
-            # Wait hoping for an auto-reconnection by _conn_manager
+            # Wait hoping for an auto-reconnection by _conn_manager.
             if not wait_for_connection or not self._is_connected_flag.wait(timeout=_reconnect_delay):
                 raise ConnectionError("Not connected to router, send failed.")
 
-        with self._conn_lock:
-            conn = self._conn
-        if conn is None:
+        with self._transport_lock:
+            transport = self._transport
+        if transport is None:
             raise ConnectionError("No connection object for router, send failed.")
 
-        # The dedicated send lock lets stop() shut the socket down even while a send is blocked mid-transfer
-        with self._send_lock:
-            try:
-                self._send_all(conn, packed_data)
-            except OSError as e:
-                # A stalled or partial send leaves the stream desynced: drop the connection so it resyncs
-                self._drop_connection(conn)
-                raise ConnectionError(f"Send failed due to socket error: {e}")
-
-    def _send_all(self, conn, packed_data: bytes):
-        """Sends all bytes, bounding how long the socket may block so a peer that stops reading
-        cannot wedge the send path (and with it the read thread, which also sends responses).
-        Raises TimeoutError if the send stalls past ``_send_timeout``, OSError on socket failure.
-        """
-        view = memoryview(packed_data)
-        total = view.nbytes
-        sent = 0
-        while sent < total:
-            _, writable, _ = select.select([], [conn], [], _send_timeout)
-            if not writable:
-                raise TimeoutError(f"Send stalled for {_send_timeout}s")
-            # select reported writability, so this send accepts at least one byte without blocking
-            sent += conn.send(view[sent:])
-
-
-class Bridge:
-    """A MessagePack-RPC bridge to an Arduino Router.
-
-    Instances are independent: create one per router you need to talk to, call
-    ``connect()`` to establish the link in the background, and ``disconnect()``
-    when done. It can also be used as a context manager, and an instance that
-    becomes garbage collected disconnects automatically as a safety net.
-
-    How an instance is shared is the caller's concern: an embedding runtime that
-    needs a process-wide bridge creates one instance and exposes it itself.
-
-    Provided handlers run sequentially, in arrival order, on a dedicated dispatcher
-    thread; a slow handler delays the handlers queued after it. A handler may send
-    notifications, but must not call back into the bridge with ``call``: the peer may
-    be blocked waiting for the handler's own response, so nested calls risk deadlocks
-    and request loops and are rejected with a RuntimeError.
-
-    Examples:
-        bridge = Bridge()
-        bridge.connect()
-        temperature = bridge.call("get_temperature", "sensor1")
-        bridge.provide("get_status", lambda: "ok")
-        bridge.notify("set_led", "green", True)
-        bridge.disconnect()
-    """
-
-    def __init__(
-        self, address: str = DEFAULT_ADDRESS, max_message_size: int = 1024 * 1024, max_pending_handlers: int = 1024
-    ):
-        """Creates a bridge for the given router address without connecting.
-
-        Args:
-            address (str): The router address, either "unix://<path>" or "tcp://<host>:<port>".
-            max_message_size (int): Maximum size in bytes of a single incoming message; the
-                connection is dropped and re-established when the peer exceeds it. Defaults to 1 MiB.
-            max_pending_handlers (int): Maximum number of queued handler executions; further
-                requests are rejected as busy and further notifications dropped. Also bounds memory:
-                at most this many queued messages, each up to max_message_size. Defaults to 1024.
-
-        Raises:
-            ValueError: If the address scheme is not supported, the address is incomplete, or
-                unix:// is used on a platform without unix socket support.
-        """
-        self._connection = _BridgeConnection(address, max_message_size, max_pending_handlers)
-        # The connection never references the handle: collecting an abandoned handle stops it.
-        # The finalizer only signals stop (never joins), so GC and interpreter exit never block on it.
-        weakref.finalize(self, self._connection._signal_stop)
-
-    @property
-    def address(self) -> str:
-        """The router address this bridge points to."""
-        return self._connection.address
-
-    def connect(self):
-        """Starts connecting to the router in the background and returns immediately.
-        The connection is retried until it succeeds (see ``wait_connected``) and
-        re-established automatically whenever it is lost. A no-op if already running.
-        """
-        self._connection.start()
-
-    def disconnect(self):
-        """Closes the connection and releases resources. Idempotent and safe to call
-        even if ``connect()`` was never called; ``connect()`` can be called again afterwards.
-        """
-        self._connection.stop()
-
-    def wait_connected(self, timeout: float | None = None) -> bool:
-        """Waits until the connection to the router is established.
-
-        Args:
-            timeout (float, optional): Maximum time to wait in seconds. Waits indefinitely if None.
-
-        Returns:
-            bool: True if connected, False if the timeout expired first.
-        """
-        return self._connection.wait_connected(timeout)
-
-    def __enter__(self):
-        self.connect()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.disconnect()
-
-    def notify(self, method_name: str, *params):
-        """Sends a notification to the microcontroller without waiting for a response.
-        Best-effort: never blocks waiting for a connection, the notification is
-        dropped if the router is not connected.
-
-        Args:
-            method_name (str): The name of the method to notify on the microcontroller.
-            *params: The parameters to pass to the method.
-
-        Examples:
-            bridge.notify("set_led", "green", True)
-        """
-        self._connection.notify(method_name, *params)
-
-    def call(self, method_name: str, *params, timeout: float | None = 10):
-        """Calls a method on the microcontroller and waits for a response.
-        Raises an exception if the call fails or times out.
-
-        Args:
-            method_name (str): The name of the method to call on the microcontroller.
-            *params: The parameters to pass to the method.
-            timeout (float, optional): The maximum time to wait for a response in seconds.
-                If None, waits indefinitely. Defaults to 10s.
-
-        Raises:
-            ValueError: If the method does not exist or the call fails.
-            TimeoutError: If the call takes more time than the specified timeout.
-            ConnectionError: If the connection drops or is stopped while waiting.
-            RuntimeError: If invoked from a provided handler (nested calls are not
-                supported), or if the call fails unexpectedly.
-
-        Examples:
-            temperature = bridge.call("get_temperature", "sensor1")
-        """
-        return self._connection.call(method_name, *params, timeout=timeout)
-
-    def provide(self, method_name: str, handler):
-        """Makes a method available to the microcontroller, so it can call it remotely.
-        The handler should be a callable that can take arguments.
-
-        Registration is declarative: the handler is recorded immediately, registered
-        with the router as soon as a connection is available, and re-registered
-        transparently on every reconnection.
-
-        The handler may send notifications but must not call back into the bridge
-        with ``call``: nested calls are rejected with a RuntimeError (see ``call``).
-
-        Args:
-            method_name (str): The name under which the function should be provided to the microcontroller.
-            handler (callable): The function to call when the microcontroller requires it.
-
-        Raises:
-            ValueError: If handler is not callable.
-
-        Examples:
-            bridge.provide("get_country", get_country)
-        """
-        self._connection.provide(method_name, handler)
-
-    def unprovide(self, method_name: str):
-        """Makes a method no more available to the microcontroller.
-
-        Args:
-            method_name (str): The name under which the function is already provided to the microcontroller.
-
-        Examples:
-            bridge.unprovide("get_country")
-        """
-        self._connection.unprovide(method_name)
+        try:
+            transport.send_all(packed_data)
+        except OSError as e:
+            # A stalled or partial send leaves the stream desynced: drop the transport so it resyncs.
+            self._drop_transport(transport)
+            raise ConnectionError(f"Send failed due to socket error: {e}")
