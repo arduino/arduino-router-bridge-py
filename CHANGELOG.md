@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-02
+
+### Added
+
+- TCP keepalive on `tcp://` connections, so a half-open connection (peer vanished without a FIN) is detected instead of appearing healthy forever. The probe timers are tuned on Linux; other platforms keep the OS defaults.
+
+### Changed
+
+- Constructing a bridge with a `unix://` address on a platform without unix socket support (e.g. Windows) now raises `ValueError` at creation; use `tcp://` for development there.
+- The library is split internally into single-concern modules (transport, protocol, pending calls, dispatch, connection, public facade). The public API is unchanged.
+
+### Fixed
+
+- Socket writes are now bounded by a send timeout: a peer that stops reading can no longer wedge the send path, and with it the read thread. A stalled or partial send drops the connection so the stream resyncs on reconnection.
+- Garbage collection and interpreter exit no longer block on the background threads: the finalizer of an abandoned bridge only signals them to stop.
+- A connection racing `disconnect()` while being established is now torn down instead of being left half-published.
+- A failed `unix://` connection attempt no longer leaks its socket until garbage collection.
+- Sending on a socket closed concurrently by `disconnect()` now raises `ConnectionError` instead of an unexpected `ValueError`.
+
 ## [0.2.0] - 2026-09-01
 
 ### Added
@@ -63,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `arduino.router_bridge` logger namespace.
 - Type hints shipped with the package (`py.typed`).
 
-[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/arduino/arduino-router-bridge-py/releases/tag/v0.1.0
