@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-02
+
+### Changed
+
+- `connect()` now waits until the connection is established: it accepts an optional `timeout` and returns `True` if connected, `False` if the timeout expired first. On timeout the bridge keeps connecting in the background, and a lost connection is still re-established automatically.
+
+### Removed
+
+- `wait_connected()`: use `connect(timeout=...)` instead, which now waits itself.
+
 ## [0.3.0] - 2026-09-02
 
 ### Added
@@ -82,7 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `arduino.router_bridge` logger namespace.
 - Type hints shipped with the package (`py.typed`).
 
-[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/arduino/arduino-router-bridge-py/releases/tag/v0.1.0

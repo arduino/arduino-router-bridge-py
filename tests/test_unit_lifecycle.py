@@ -49,20 +49,21 @@ class TestLifecycle(unittest.TestCase):
         self.assertTrue(ready.wait(timeout=2), "Dummy server did not become ready")
         return sock_path
 
-    def test_connect_is_non_blocking(self):
-        """connect() must return immediately even if the router is not reachable."""
+    def test_connect_honors_the_timeout(self):
+        """connect() must return False within the timeout when the router is not reachable,
+        and keep connecting in the background."""
         bridge = Bridge("unix:///tmp/never-exists.sock")
-        bridge.connect()  # Must not block waiting for a connection
         self.addCleanup(bridge.disconnect)
-        self.assertFalse(bridge.wait_connected(timeout=0.1))
+
+        self.assertFalse(bridge.connect(timeout=0.1))
+        self.assertTrue(bridge._connection._read_thread.is_alive())  # Still retrying in the background
 
     def test_connect_then_disconnect_joins_background_threads(self):
         """connect() spawns real background threads; disconnect() must join them so they do not leak."""
         sock_path = self._start_dummy_server()
 
         bridge = Bridge(f"unix://{sock_path}")
-        bridge.connect()
-        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
+        self.assertTrue(bridge.connect(timeout=2), "Bridge did not connect")
         read_thread = bridge._connection._read_thread
         dispatch_thread = bridge._connection._dispatcher._thread
         self.assertTrue(read_thread.is_alive())
@@ -79,8 +80,7 @@ class TestLifecycle(unittest.TestCase):
         sock_path = self._start_dummy_server()
 
         bridge = Bridge(f"unix://{sock_path}")
-        bridge.connect()
-        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
+        self.assertTrue(bridge.connect(timeout=2), "Bridge did not connect")
         connection = bridge._connection  # Outlives the handle so we can observe the wind-down
         read_thread = connection._read_thread
         dispatch_thread = connection._dispatcher._thread
@@ -105,11 +105,12 @@ class TestLifecycle(unittest.TestCase):
         """The bridge can be used as a context manager that connects on enter and disconnects on exit."""
         bridge = Bridge("unix:///tmp/never-exists.sock")
 
-        # Avoid real connecting/looping
-        with (
-            patch.object(_BridgeConnection, "_connect"),
-            patch.object(_BridgeConnection, "_conn_manager", lambda self: self._stop_event.wait()),
-        ):
+        # Avoid real connecting/looping; report connected so a blocking __enter__ returns
+        def fake_manager(conn):
+            conn._is_connected_flag.set()
+            conn._stop_event.wait()
+
+        with patch.object(_BridgeConnection, "_conn_manager", fake_manager):
             with bridge as entered:
                 self.assertIs(entered, bridge)
                 self.assertTrue(bridge._connection._read_thread.is_alive())
@@ -120,14 +121,11 @@ class TestLifecycle(unittest.TestCase):
 
     def test_connect_is_idempotent(self):
         """Calling connect() twice does not spawn a second set of background threads."""
-        with (
-            patch.object(_BridgeConnection, "_connect"),
-            patch.object(_BridgeConnection, "_conn_manager", lambda self: self._stop_event.wait()),
-        ):
+        with patch.object(_BridgeConnection, "_conn_manager", lambda self: self._stop_event.wait()):
             bridge = Bridge("unix:///tmp/never-exists.sock")
-            bridge.connect()
+            bridge.connect(timeout=0)
             first_thread = bridge._connection._read_thread
-            bridge.connect()  # idempotent
+            bridge.connect(timeout=0)  # idempotent
             self.assertIs(bridge._connection._read_thread, first_thread)
             bridge.disconnect()
 
@@ -138,10 +136,8 @@ class TestLifecycle(unittest.TestCase):
         bridge = Bridge(f"unix://{sock_path}")
         self.addCleanup(bridge.disconnect)
 
-        bridge.connect()
-        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
+        self.assertTrue(bridge.connect(timeout=2), "Bridge did not connect")
         bridge.disconnect()
-        self.assertFalse(bridge.wait_connected(timeout=0.1))
+        self.assertFalse(bridge._connection._is_connected_flag.is_set())
 
-        bridge.connect()
-        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not reconnect after restart")
+        self.assertTrue(bridge.connect(timeout=2), "Bridge did not reconnect after restart")

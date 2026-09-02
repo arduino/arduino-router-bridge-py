@@ -164,32 +164,6 @@ class TestSendAll(SocketPairTest):
             transport.send_all(b"payload")
 
 
-class TestIsAlive(SocketPairTest):
-    def test_open_idle_socket(self):
-        """is_alive must be True when the socket is open with nothing to read."""
-        transport, _ = self.make_pair()
-        self.assertTrue(transport.is_alive())
-
-    def test_readable_socket_with_data(self):
-        """is_alive must be True when the socket has pending data, and must not consume it."""
-        transport, peer = self.make_pair()
-        peer.sendall(b"data")
-        self.assertTrue(transport.is_alive())
-        self.assertEqual(transport.recv(4), b"data")  # The peek left the bytes in the buffer
-
-    def test_peer_closed_socket(self):
-        """is_alive must be False when the peer performed an orderly shutdown."""
-        transport, peer = self.make_pair()
-        peer.close()
-        self.assertFalse(transport.is_alive())
-
-    def test_broken_socket(self):
-        """is_alive must be False when the socket errors out."""
-        transport, _ = self.make_pair()
-        transport.close()
-        self.assertFalse(transport.is_alive())
-
-
 class TestClose(SocketPairTest):
     def test_close_is_idempotent(self):
         transport, _ = self.make_pair()

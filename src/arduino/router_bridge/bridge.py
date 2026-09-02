@@ -14,9 +14,9 @@ class Bridge:
     """A MessagePack-RPC bridge to an Arduino Router.
 
     Instances are independent: create one per router you need to talk to, call
-    ``connect()`` to establish the link in the background, and ``disconnect()``
-    when done. It can also be used as a context manager, and an instance that
-    becomes garbage collected disconnects automatically as a safety net.
+    ``connect()`` to establish the link, and ``disconnect()`` when done. It can
+    also be used as a context manager, and an instance that becomes garbage
+    collected disconnects automatically as a safety net.
 
     How an instance is shared is the caller's concern: an embedding runtime that
     needs a process-wide bridge creates one instance and exposes it itself.
@@ -62,29 +62,27 @@ class Bridge:
         """The router address this bridge points to."""
         return self._connection.address
 
-    def connect(self):
-        """Starts connecting to the router in the background and returns immediately.
-        The connection is retried until it succeeds (see ``wait_connected``) and
-        re-established automatically whenever it is lost. A no-op if already running.
+    def connect(self, timeout: float | None = None) -> bool:
+        """Connects to the router, waiting until the connection is established.
+        Reaching the router is retried until it succeeds, and the connection is
+        re-established automatically whenever it is lost. On a bridge that is
+        already connecting, it just waits.
+
+        Args:
+            timeout (float, optional): Maximum time to wait in seconds. Waits indefinitely if None.
+
+        Returns:
+            bool: True if connected, False if the timeout expired first; on timeout
+                the bridge keeps connecting in the background.
         """
         self._connection.start()
+        return self._connection.wait_connected(timeout)
 
     def disconnect(self):
         """Closes the connection and releases resources. Idempotent and safe to call
         even if ``connect()`` was never called; ``connect()`` can be called again afterwards.
         """
         self._connection.stop()
-
-    def wait_connected(self, timeout: float | None = None) -> bool:
-        """Waits until the connection to the router is established.
-
-        Args:
-            timeout (float, optional): Maximum time to wait in seconds. Waits indefinitely if None.
-
-        Returns:
-            bool: True if connected, False if the timeout expired first.
-        """
-        return self._connection.wait_connected(timeout)
 
     def __enter__(self):
         self.connect()

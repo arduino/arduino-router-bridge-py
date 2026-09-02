@@ -15,8 +15,14 @@ from arduino.router_bridge.connection import _BridgeConnection
 class TestBridgeHandle(UnitTest):
     @contextmanager
     def idle_conn_manager(self):
-        """Replaces the connection manager loop with a plain wait, so no socket is ever touched."""
-        with patch.object(_BridgeConnection, "_conn_manager", lambda self: self._stop_event.wait()):
+        """Replaces the connection manager loop with a fake that reports itself connected
+        without touching any socket, so a blocking connect() returns."""
+
+        def run(conn):
+            conn._is_connected_flag.set()
+            conn._stop_event.wait()
+
+        with patch.object(_BridgeConnection, "_conn_manager", run):
             yield
 
     def test_public_api_delegates_to_connection(self):
@@ -24,8 +30,9 @@ class TestBridgeHandle(UnitTest):
         bridge = Bridge()
         bridge._connection = MagicMock()
 
-        bridge.connect()
+        bridge.connect(timeout=1)
         bridge._connection.start.assert_called_once()
+        bridge._connection.wait_connected.assert_called_once_with(1)
 
         bridge.notify("a_method", 1, 2)
         bridge._connection.notify.assert_called_once_with("a_method", 1, 2)
@@ -39,9 +46,6 @@ class TestBridgeHandle(UnitTest):
 
         bridge.unprovide("c_method")
         bridge._connection.unprovide.assert_called_once_with("c_method")
-
-        bridge.wait_connected(timeout=1)
-        bridge._connection.wait_connected.assert_called_once_with(1)
 
         bridge.disconnect()
         bridge._connection.stop.assert_called_once()
