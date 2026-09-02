@@ -91,6 +91,12 @@ class TestBridgeHandle(UnitTest):
             with self.assertRaises(ValueError, msg=f"Address '{bad_address}' was not rejected"):
                 Bridge(bad_address)
 
+    def test_unix_address_rejected_without_af_unix_support(self):
+        """unix:// addresses must fail at construction on platforms lacking AF_UNIX (e.g. Windows)."""
+        del self.mock_socket.AF_UNIX
+        with self.assertRaises(ValueError):
+            Bridge("unix:///tmp/test.sock")
+
     def test_address_property(self):
         """The bridge exposes the address it points to."""
         bridge = Bridge("tcp://somehost:4321")

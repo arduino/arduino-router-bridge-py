@@ -58,11 +58,17 @@ class _BridgeConnection:
                 at most this many queued messages, each up to max_message_size. Defaults to 1024.
 
         Raises:
-            ValueError: If the address scheme is not supported or the address is incomplete.
+            ValueError: If the address scheme is not supported, the address is incomplete, or
+                unix:// is used on a platform without unix socket support.
         """
         self.address = address
         urlparsed = urlparse(address)
         if urlparsed.scheme == "unix":
+            if not hasattr(socket, "AF_UNIX"):
+                raise ValueError(
+                    f"Invalid address '{address}': unix:// sockets are not supported on this platform. "
+                    "The router runs on the Linux board; use tcp:// only for development."
+                )
             if not urlparsed.path:
                 raise ValueError(f"Invalid unix address '{address}': expected unix://<path>.")
             self.socket_type = "unix"
@@ -697,7 +703,8 @@ class Bridge:
                 at most this many queued messages, each up to max_message_size. Defaults to 1024.
 
         Raises:
-            ValueError: If the address scheme is not supported or the address is incomplete.
+            ValueError: If the address scheme is not supported, the address is incomplete, or
+                unix:// is used on a platform without unix socket support.
         """
         self._connection = _BridgeConnection(address, max_message_size, max_pending_handlers)
         # The connection never references the handle: collecting an abandoned handle stops it.
