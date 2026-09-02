@@ -36,12 +36,12 @@ FUNCTION_NOT_FOUND_ERR = 0xFE
 GENERIC_ERR = 0xFF
 
 
-class _BridgeEngine:
-    """Internal engine of a `Bridge`: owns the socket, the background read/reconnect
+class _BridgeConnection:
+    """Internal connection behind a `Bridge`: owns the socket, the background read/reconnect
     thread and the handler dispatcher.
 
-    The background threads reference the engine, never the public `Bridge` handle,
-    so an unreachable handle can be garbage collected and stop its engine.
+    The background threads reference this connection, never the public `Bridge` handle,
+    so an unreachable handle can be garbage collected and stop it.
     """
 
     def __init__(
@@ -369,7 +369,9 @@ class _BridgeEngine:
                     host, port = self._peer_addr
                     conn = socket.create_connection((host, port), timeout=5)
                 conn.settimeout(None)  # Set blocking recv
-                self._configure_keepalive(conn)
+                if self.socket_type == "tcp":
+                    self._configure_tcp_keepalive(conn)
+
                 with self._conn_lock:
                     self._conn = conn
                 self._is_connected_flag.set()
@@ -389,7 +391,7 @@ class _BridgeEngine:
                 def register_methods_on_connect():
                     with self.handlers_lock:
                         methods = list(self.handlers.keys())
-                    for method in methods:  # Register outside handlers_lock: each call blocks for a response
+                    for method in methods:
                         try:
                             self.call("$/register", method)
                         except Exception as e:
@@ -430,14 +432,11 @@ class _BridgeEngine:
             logger.error(f"Unexpected error while checking socket status: {e}")
             return False  # Assume the socket is broken for any other exception
 
-    def _configure_keepalive(self, conn):
-        """Enables TCP keepalive so a half-open connection is detected instead of appearing healthy
-        forever. No-op for unix sockets. The timers are tuned on Linux; macOS and Windows are
-        development-only and keep the OS default idle, where the timer constants are absent.
+    def _configure_tcp_keepalive(self, conn):
+        """Enables keepalive on a TCP socket so a half-open connection is detected instead of
+        appearing healthy forever. The timers are tuned on Linux; macOS and Windows are
+        development-only and keep the OS defaults.
         """
-        if self.socket_type != "tcp":
-            return
-
         try:
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         except OSError as e:
@@ -464,7 +463,7 @@ class _BridgeEngine:
         self._is_connected_flag.clear()
         with self._conn_lock:
             if self._conn is not conn or conn is None:
-                return  # Already replaced by a newer connection or torn down
+                return  # Already replaced by a newer connection or dropped
             try:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -505,9 +504,8 @@ class _BridgeEngine:
                     break
         finally:
             # Tear the socket down so _connect rebuilds it: on a buffer-limit or decode error the
-            # socket is still alive but the stream is desynced, and _is_connected would call it healthy
+            # socket is still alive but the stream is desynced but _is_connected would call it healthy
             self._drop_connection(conn)
-            # Connection was lost unexpectedly but we were meant to be running, tell the user
             self._fail_pending_callbacks(ConnectionError("Connection to router lost."))
 
     # The arduino-router guarantees str-encoded method names; anything else is a malformed message
@@ -660,7 +658,7 @@ class _BridgeEngine:
 
 
 class Bridge:
-    """A MessagePack-RPC bridge to an Arduino router.
+    """A MessagePack-RPC bridge to an Arduino Router.
 
     Instances are independent: create one per router you need to talk to, call
     ``connect()`` to establish the link in the background, and ``disconnect()``
@@ -701,28 +699,28 @@ class Bridge:
         Raises:
             ValueError: If the address scheme is not supported or the address is incomplete.
         """
-        self._engine = _BridgeEngine(address, max_message_size, max_pending_handlers)
-        # The engine never references the handle: collecting an abandoned handle stops its engine.
+        self._connection = _BridgeConnection(address, max_message_size, max_pending_handlers)
+        # The connection never references the handle: collecting an abandoned handle stops it.
         # The finalizer only signals stop (never joins), so GC and interpreter exit never block on it.
-        self._finalizer = weakref.finalize(self, self._engine._signal_stop)
+        weakref.finalize(self, self._connection._signal_stop)
 
     @property
     def address(self) -> str:
         """The router address this bridge points to."""
-        return self._engine.address
+        return self._connection.address
 
     def connect(self):
         """Starts connecting to the router in the background and returns immediately.
         The connection is retried until it succeeds (see ``wait_connected``) and
         re-established automatically whenever it is lost. A no-op if already running.
         """
-        self._engine.start()
+        self._connection.start()
 
     def disconnect(self):
         """Closes the connection and releases resources. Idempotent and safe to call
         even if ``connect()`` was never called; ``connect()`` can be called again afterwards.
         """
-        self._engine.stop()
+        self._connection.stop()
 
     def wait_connected(self, timeout: float | None = None) -> bool:
         """Waits until the connection to the router is established.
@@ -733,7 +731,7 @@ class Bridge:
         Returns:
             bool: True if connected, False if the timeout expired first.
         """
-        return self._engine.wait_connected(timeout)
+        return self._connection.wait_connected(timeout)
 
     def __enter__(self):
         self.connect()
@@ -754,7 +752,7 @@ class Bridge:
         Examples:
             bridge.notify("set_led", "green", True)
         """
-        self._engine.notify(method_name, *params)
+        self._connection.notify(method_name, *params)
 
     def call(self, method_name: str, *params, timeout: float | None = 10):
         """Calls a method on the microcontroller and waits for a response.
@@ -776,7 +774,7 @@ class Bridge:
         Examples:
             temperature = bridge.call("get_temperature", "sensor1")
         """
-        return self._engine.call(method_name, *params, timeout=timeout)
+        return self._connection.call(method_name, *params, timeout=timeout)
 
     def provide(self, method_name: str, handler):
         """Makes a method available to the microcontroller, so it can call it remotely.
@@ -799,7 +797,7 @@ class Bridge:
         Examples:
             bridge.provide("get_country", get_country)
         """
-        self._engine.provide(method_name, handler)
+        self._connection.provide(method_name, handler)
 
     def unprovide(self, method_name: str):
         """Makes a method no more available to the microcontroller.
@@ -810,4 +808,4 @@ class Bridge:
         Examples:
             bridge.unprovide("get_country")
         """
-        self._engine.unprovide(method_name)
+        self._connection.unprovide(method_name)

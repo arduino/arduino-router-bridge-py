@@ -14,13 +14,13 @@ from arduino.router_bridge.connection import GENERIC_ERR
 class TestCoreFeatures(UnitTest):
     def test_initialization_default_address(self):
         """Test that the bridge connects to the default router address when none is given."""
-        client = self.make_engine()
+        client = self.make_connection()
         self.assertEqual(client.socket_type, "unix")
         self.assertEqual(client._peer_addr, "/var/run/arduino-router.sock")
 
     def test_initialization_tcp(self):
         """Test that the bridge initializes correctly with a TCP address and connects on demand."""
-        client = self.make_engine(address="tcp://localhost:1234")
+        client = self.make_connection(address="tcp://localhost:1234")
         self.assertEqual(client.socket_type, "tcp")
         self.assertEqual(client._peer_addr, ("localhost", 1234))
         self.assertEqual(self.mock_thread_instance.start.call_count, 2)  # start() spawns read loop and dispatcher
@@ -30,7 +30,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_initialization_unix(self):
         """Test that the bridge initializes correctly with a Unix socket address and connects on demand."""
-        client = self.make_engine(address="unix:///tmp/test.sock")
+        client = self.make_connection(address="unix:///tmp/test.sock")
         self.assertEqual(client.socket_type, "unix")
         self.assertEqual(client._peer_addr, "/tmp/test.sock")
         self.assertEqual(self.mock_thread_instance.start.call_count, 2)  # start() spawns read loop and dispatcher
@@ -41,7 +41,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_notify(self):
         """Test that the notify method sends a correctly formatted msgpack notification."""
-        client = self.make_engine()
+        client = self.make_connection()
         client._send_bytes = MagicMock()
 
         method_name = "test_notify"
@@ -55,7 +55,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_notify_does_not_block_when_disconnected(self):
         """Test that notify returns immediately and drops the message when the router is not connected."""
-        client = self.make_engine()
+        client = self.make_connection()
 
         start = time.monotonic()
         client.notify("set_led", "green")  # Must not wait for a reconnection
@@ -65,7 +65,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_call_successful(self):
         """Test a successful RPC call where a response is received."""
-        client = self.make_engine()
+        client = self.make_connection()
         client._send_bytes = MagicMock()
 
         method_name = "test_call"
@@ -89,7 +89,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_call_successful_nones(self):
         """Test a successful RPC call without params where a None response is received."""
-        client = self.make_engine()
+        client = self.make_connection()
         client._send_bytes = MagicMock()
 
         method_name = "test_call"
@@ -113,7 +113,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_call_timeout(self):
         """Test that an RPC call raises a TimeoutError if no response is received."""
-        client = self.make_engine()
+        client = self.make_connection()
         client._send_bytes = MagicMock()  # Don't simulate a response
 
         with self.assertRaises(TimeoutError):
@@ -121,7 +121,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_call_server_error(self):
         """Test an RPC call that returns an error from the server."""
-        client = self.make_engine()
+        client = self.make_connection()
         client._send_bytes = MagicMock()
 
         method_name = "test_error"
@@ -141,7 +141,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_provide_and_unprovide(self):
         """Test providing a method and then unproviding it while connected."""
-        client = self.make_engine()
+        client = self.make_connection()
         client.call = MagicMock()
         self.connect_client(client)
 
@@ -163,7 +163,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_provide_while_disconnected_defers_registration(self):
         """Test that providing while disconnected records the handler without calling the router."""
-        client = self.make_engine()
+        client = self.make_connection()
         client.call = MagicMock()
 
         method_name = "my_handler"
@@ -179,7 +179,7 @@ class TestCoreFeatures(UnitTest):
 
     def test_provide_update(self):
         """Test that it is possible to update a provided method."""
-        client = self.make_engine()
+        client = self.make_connection()
         client.call = MagicMock()
         self.connect_client(client)
 

@@ -11,39 +11,39 @@ from arduino.router_bridge import Bridge
 
 
 class TestBridgeHandle(UnitTest):
-    def test_public_api_delegates_to_engine(self):
-        """The Bridge handle must delegate every public operation to its engine."""
+    def test_public_api_delegates_to_connection(self):
+        """The Bridge handle must delegate every public operation to its connection."""
         bridge = Bridge()
-        bridge._engine = MagicMock()
+        bridge._connection = MagicMock()
 
         bridge.connect()
-        bridge._engine.start.assert_called_once()
+        bridge._connection.start.assert_called_once()
 
         bridge.notify("a_method", 1, 2)
-        bridge._engine.notify.assert_called_once_with("a_method", 1, 2)
+        bridge._connection.notify.assert_called_once_with("a_method", 1, 2)
 
-        self.assertEqual(bridge.call("b_method", 3, timeout=5), bridge._engine.call.return_value)
-        bridge._engine.call.assert_called_once_with("b_method", 3, timeout=5)
+        self.assertEqual(bridge.call("b_method", 3, timeout=5), bridge._connection.call.return_value)
+        bridge._connection.call.assert_called_once_with("b_method", 3, timeout=5)
 
         handler = lambda: None
         bridge.provide("c_method", handler)
-        bridge._engine.provide.assert_called_once_with("c_method", handler)
+        bridge._connection.provide.assert_called_once_with("c_method", handler)
 
         bridge.unprovide("c_method")
-        bridge._engine.unprovide.assert_called_once_with("c_method")
+        bridge._connection.unprovide.assert_called_once_with("c_method")
 
         bridge.wait_connected(timeout=1)
-        bridge._engine.wait_connected.assert_called_once_with(1)
+        bridge._connection.wait_connected.assert_called_once_with(1)
 
         bridge.disconnect()
-        bridge._engine.stop.assert_called_once()
+        bridge._connection.stop.assert_called_once()
 
     def test_instances_are_independent(self):
-        """Each Bridge must own its own engine: no process-wide sharing."""
+        """Each Bridge must own its own connection: no process-wide sharing."""
         first = Bridge()
         second = Bridge()
         self.bridges.extend([first, second])
-        self.assertIsNot(first._engine, second._engine)
+        self.assertIsNot(first._connection, second._connection)
 
     def test_context_manager_connects_and_disconnects(self):
         """The bridge can be used as a context manager."""
@@ -52,20 +52,20 @@ class TestBridgeHandle(UnitTest):
 
         with bridge as entered:
             self.assertIs(entered, bridge)
-            self.assertIsNotNone(bridge._engine._read_thread)
+            self.assertIsNotNone(bridge._connection._read_thread)
 
-        self.assertTrue(bridge._engine._stop_event.is_set())
+        self.assertTrue(bridge._connection._stop_event.is_set())
 
-    def test_garbage_collected_bridge_stops_its_engine(self):
+    def test_garbage_collected_bridge_stops_its_connection(self):
         """An abandoned bridge must disconnect automatically when garbage collected."""
         bridge = Bridge()
         bridge.connect()
-        engine = bridge._engine
+        connection = bridge._connection
 
         del bridge
         gc.collect()
 
-        self.assertTrue(engine._stop_event.is_set())
+        self.assertTrue(connection._stop_event.is_set())
 
     def test_reconnect_after_disconnect(self):
         """connect() must work again after disconnect()."""
@@ -74,10 +74,10 @@ class TestBridgeHandle(UnitTest):
 
         bridge.connect()
         bridge.disconnect()
-        self.assertTrue(bridge._engine._stop_event.is_set())
+        self.assertTrue(bridge._connection._stop_event.is_set())
 
         bridge.connect()
-        self.assertFalse(bridge._engine._stop_event.is_set())
+        self.assertFalse(bridge._connection._stop_event.is_set())
 
     def test_invalid_addresses_are_rejected(self):
         """The constructor must reject unsupported or incomplete addresses."""
