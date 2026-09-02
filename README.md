@@ -17,8 +17,7 @@ Create a `Bridge`, connect it, and use it for as long as you need:
 from arduino.router_bridge import Bridge
 
 bridge = Bridge()
-bridge.connect()  # Returns immediately, connects in the background
-bridge.wait_connected(timeout=5)  # Optional
+bridge.connect(timeout=5)  # Waits until connected; True if connected, False on timeout
 
 # Fire-and-forget notification
 bridge.notify("set_led", "green", True)
@@ -65,8 +64,7 @@ bridge = Bridge()  # Uses the default address unix:///var/run/arduino-router.soc
 bridge.connect()
 ```
 
-Connections are established lazily in the background and reconnected
-automatically. Disconnect explicitly (or use a context manager) when done; as a safety net, a garbage-collected bridge disconnects automatically.
+`connect()` waits until the connection is established, indefinitely unless a `timeout` is given, and returns whether it succeeded; on timeout the bridge keeps connecting in the background. A lost connection is re-established automatically. Disconnect explicitly (or use a context manager) when done; as a safety net, a garbage-collected bridge disconnects automatically.
 
 ## Security model
 

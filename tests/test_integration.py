@@ -59,7 +59,7 @@ class TestIntegration(unittest.TestCase):
         """Creates a bridge to the test socket, connects it and registers it for teardown."""
         bridge = Bridge(f"unix://{self.socket_path}")
         self.bridges.append(bridge)
-        bridge.connect()
+        self.assertTrue(bridge.connect(timeout=2), "Bridge did not connect")
         return bridge
 
     def test_notify(self):
@@ -89,7 +89,6 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
         client = self._connect_bridge()
-        client.wait_connected(timeout=2)
 
         client.notify("test_method", "hello", 123)
 
@@ -129,7 +128,6 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
         client = self._connect_bridge()
-        client.wait_connected(timeout=2)
 
         result = client.call("get_value")
         self.assertEqual(result, "success!")
@@ -154,7 +152,6 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
         client = self._connect_bridge()
-        client.wait_connected(timeout=2)
 
         with self.assertRaises(ConnectionError):
             client.call("some_method", timeout=5)
@@ -206,7 +203,6 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
         client = self._connect_bridge()
-        client.wait_connected(timeout=2)
 
         client.provide("add", lambda a, b: a + b)
 
@@ -271,7 +267,6 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
         client = self._connect_bridge()
-        client.wait_connected(timeout=2)
 
         def worker(x):
             client.notify("progress", x)  # Notifications from handlers are allowed
@@ -360,7 +355,6 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(server_ready.wait(timeout=2), "Server did not become ready")
 
         client = self._connect_bridge()
-        client.wait_connected(timeout=2)
 
         with self.assertRaises(ValueError) as cm:
             client.call("some_method")
