@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_ADDRESS = "unix:///var/run/arduino-router.sock"
 
 _reconnect_delay = 3.0  # seconds
+_send_timeout = 15.0  # seconds; bounds a blocking send so a stalled peer cannot block the send path
 
 # Error codes for RPC messages received from the RPC router. These are defined in the RPC router itself.
 ROUTE_ALREADY_EXISTS_ERR = 0x05
@@ -47,7 +48,8 @@ class _BridgeEngine:
             max_message_size (int): Maximum size in bytes of a single incoming message; the
                 connection is dropped and re-established when the peer exceeds it. Defaults to 1 MiB.
             max_pending_handlers (int): Maximum number of queued handler executions; further
-                requests are rejected as busy and further notifications dropped. Defaults to 1024.
+                requests are rejected as busy and further notifications dropped. Also bounds memory:
+                at most this many queued messages, each up to max_message_size. Defaults to 1024.
 
         Raises:
             ValueError: If the address scheme is not supported or the address is incomplete.
@@ -90,7 +92,6 @@ class _BridgeEngine:
         self._is_connected_flag = threading.Event()  # This avoids locking recv calls
         self._stop_event = threading.Event()
         self._read_thread = None
-        # Incoming requests/notifications for the dispatcher, bounded to cap memory usage
         self._dispatch_queue = queue.Queue(maxsize=max_pending_handlers)
         self._dispatch_thread = None
 
@@ -115,29 +116,12 @@ class _BridgeEngine:
 
     def stop(self):
         """Stops the background loops, closes the connection and releases resources.
-        Idempotent and safe to call even if ``start()`` was never called.
+        Idempotent and safe to call even if ``start()`` was never called. Blocks briefly
+        while the background threads wind down; use ``_signal_stop`` from contexts that
+        must not block, such as a finalizer.
         """
         with self._lifecycle_lock:
-            self._stop_event.set()
-            self._is_connected_flag.clear()
-
-            # Shutdown wakes a blocked recv()/sendall(); _conn_lock is never held during those, so this cannot deadlock
-            with self._conn_lock:
-                if self._conn is not None:
-                    try:
-                        self._conn.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass  # Already disconnected
-                    try:
-                        self._conn.close()  # Release resources
-                    except Exception:
-                        pass
-                    self._conn = None
-
-            try:
-                self._dispatch_queue.put_nowait(None)  # Wake the dispatcher so it can exit
-            except queue.Full:
-                pass  # The dispatcher is draining items and will notice the stop event by itself
+            self._signal_stop()
 
             current = threading.current_thread()
             for thread in (self._read_thread, self._dispatch_thread):
@@ -149,6 +133,32 @@ class _BridgeEngine:
             self._dispatch_thread = None
 
         self._fail_pending_callbacks(ConnectionError("Bridge connection stopped."))
+
+    def _signal_stop(self):
+        """Signals the background loops to exit and tears down the socket without waiting.
+        Never blocks, so it is safe to run from a weakref finalizer or at interpreter exit:
+        the daemon threads notice the stop event and wind down on their own.
+        """
+        self._stop_event.set()
+        self._is_connected_flag.clear()
+
+        # Shutdown wakes a blocked recv()/send(); _conn_lock is never held during those, so this cannot deadlock
+        with self._conn_lock:
+            if self._conn is not None:
+                try:
+                    self._conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass  # Already disconnected
+                try:
+                    self._conn.close()  # Release resources
+                except Exception:
+                    pass
+                self._conn = None
+
+        try:
+            self._dispatch_queue.put_nowait(None)  # Wake the dispatcher so it can exit
+        except queue.Full:
+            pass  # The dispatcher is draining items and will notice the stop event by itself
 
     def wait_connected(self, timeout: float | None = None) -> bool:
         """Waits until the connection to the router is established.
@@ -413,6 +423,24 @@ class _BridgeEngine:
             logger.error(f"Unexpected error while checking socket status: {e}")
             return False  # Assume the socket is broken for any other exception
 
+    def _drop_connection(self, conn):
+        """Forces the given connection down so _conn_manager reconnects and resyncs the stream.
+        Safe to call from any thread and idempotent: a no-op once conn has been replaced.
+        """
+        self._is_connected_flag.clear()
+        with self._conn_lock:
+            if self._conn is not conn or conn is None:
+                return  # Already replaced by a newer connection or torn down
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # Already disconnected
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
     def _read_loop(self):
         """The core loop that reads and processes messages from the active socket.
         Returns when the connection is lost or stop is requested. Reconnection is
@@ -442,6 +470,9 @@ class _BridgeEngine:
                     logger.error(f"Unexpected error in read loop: {e}")
                     break
         finally:
+            # Tear the socket down so _connect rebuilds it: on a buffer-limit or decode error the
+            # socket is still alive but the stream is desynced, and _is_connected would call it healthy
+            self._drop_connection(conn)
             # Connection was lost unexpectedly but we were meant to be running, tell the user
             self._fail_pending_callbacks(ConnectionError("Connection to router lost."))
 
@@ -572,9 +603,26 @@ class _BridgeEngine:
         # The dedicated send lock lets stop() shut the socket down even while a send is blocked mid-transfer
         with self._send_lock:
             try:
-                conn.sendall(packed_data)
-            except socket.error as e:
+                self._send_all(conn, packed_data)
+            except OSError as e:
+                # A stalled or partial send leaves the stream desynced: drop the connection so it resyncs
+                self._drop_connection(conn)
                 raise ConnectionError(f"Send failed due to socket error: {e}")
+
+    def _send_all(self, conn, packed_data: bytes):
+        """Sends all bytes, bounding how long the socket may block so a peer that stops reading
+        cannot wedge the send path (and with it the read thread, which also sends responses).
+        Raises TimeoutError if the send stalls past ``_send_timeout``, OSError on socket failure.
+        """
+        view = memoryview(packed_data)
+        total = view.nbytes
+        sent = 0
+        while sent < total:
+            _, writable, _ = select.select([], [conn], [], _send_timeout)
+            if not writable:
+                raise TimeoutError(f"Send stalled for {_send_timeout}s")
+            # select reported writability, so this send accepts at least one byte without blocking
+            sent += conn.send(view[sent:])
 
 
 class Bridge:
@@ -613,14 +661,16 @@ class Bridge:
             max_message_size (int): Maximum size in bytes of a single incoming message; the
                 connection is dropped and re-established when the peer exceeds it. Defaults to 1 MiB.
             max_pending_handlers (int): Maximum number of queued handler executions; further
-                requests are rejected as busy and further notifications dropped. Defaults to 1024.
+                requests are rejected as busy and further notifications dropped. Also bounds memory:
+                at most this many queued messages, each up to max_message_size. Defaults to 1024.
 
         Raises:
             ValueError: If the address scheme is not supported or the address is incomplete.
         """
         self._engine = _BridgeEngine(address, max_message_size, max_pending_handlers)
-        # The engine never references the handle: collecting an abandoned handle stops its engine
-        self._finalizer = weakref.finalize(self, self._engine.stop)
+        # The engine never references the handle: collecting an abandoned handle stops its engine.
+        # The finalizer only signals stop (never joins), so GC and interpreter exit never block on it.
+        self._finalizer = weakref.finalize(self, self._engine._signal_stop)
 
     @property
     def address(self) -> str:

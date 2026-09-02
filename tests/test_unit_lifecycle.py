@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import gc
 import os
 import socket
 import tempfile
@@ -71,6 +72,27 @@ class TestLifecycle(unittest.TestCase):
         self.assertFalse(read_thread.is_alive(), "Read thread leaked after disconnect()")
         self.assertFalse(dispatch_thread.is_alive(), "Dispatcher thread leaked after disconnect()")
         self.assertIsNone(bridge._engine._read_thread)
+
+    def test_abandoned_handle_stops_engine_without_blocking(self):
+        """Dropping a handle must stop its engine via the non-blocking finalizer, not a join in GC."""
+        sock_path = self._start_dummy_server()
+
+        bridge = Bridge(f"unix://{sock_path}")
+        bridge.connect()
+        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
+        engine = bridge._engine  # Outlives the handle so we can observe the wind-down
+        read_thread = engine._read_thread
+        dispatch_thread = engine._dispatch_thread
+
+        del bridge
+        gc.collect()  # Fires the finalizer; must not block on a thread join
+
+        # Daemon threads notice the stop event and wind down on their own
+        read_thread.join(timeout=2)
+        dispatch_thread.join(timeout=2)
+        self.assertFalse(read_thread.is_alive(), "Read thread leaked after handle was collected")
+        self.assertFalse(dispatch_thread.is_alive(), "Dispatcher thread leaked after handle was collected")
+        self.assertTrue(engine._stop_event.is_set())
 
     def test_disconnect_without_connect_is_safe(self):
         """disconnect() must be a safe no-op even if connect() was never called."""

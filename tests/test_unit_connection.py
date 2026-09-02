@@ -64,12 +64,14 @@ class TestConnection(UnitTest):
     def test_read_loop_exits_on_unexpected_error(self):
         """The read loop must bail out on unexpected socket errors instead of spinning forever."""
         client = self.make_engine()
-        client._conn = MagicMock()
-        client._conn.recv.side_effect = OSError("Bad file descriptor")
+        conn = MagicMock()
+        client._conn = conn
+        conn.recv.side_effect = OSError("Bad file descriptor")
 
         client._read_loop()  # Must return, handing control back to the connection manager
 
-        client._conn.recv.assert_called_once()  # No retry on the dead socket
+        conn.recv.assert_called_once()  # No retry on the dead socket
+        self.assertIsNone(client._conn)  # Socket dropped so _connect rebuilds instead of reusing it
 
     def test_read_loop_fails_pending_callbacks_on_exit(self):
         """The read loop must fail pending requests when the connection is lost."""
@@ -108,23 +110,41 @@ class TestConnection(UnitTest):
 class TestLockDiscipline(UnitTest):
     """Blocking I/O must never happen while holding the internal locks."""
 
-    def test_sendall_runs_without_holding_conn_lock(self):
-        """_send_bytes must not hold _conn_lock during sendall, so stop() can always shut the socket down."""
+    def test_send_runs_without_holding_conn_lock(self):
+        """_send_bytes must not hold _conn_lock during the socket write, so stop() can always shut the socket down."""
         client = self.make_engine()
         self.connect_client(client)
 
         conn_lock_free = []
 
-        def sendall(data):
+        def send(data):
             acquired = client._conn_lock.acquire(blocking=False)
             if acquired:
                 client._conn_lock.release()
             conn_lock_free.append(acquired)
+            return len(data)
 
-        client._conn.sendall.side_effect = sendall
-        client._send_bytes(b"payload")
+        client._conn.send.side_effect = send
+        with patch("arduino.router_bridge.connection.select.select", return_value=([], [client._conn], [])):
+            client._send_bytes(b"payload")
 
         self.assertEqual(conn_lock_free, [True])
+
+    def test_send_stall_drops_connection(self):
+        """A send that never becomes writable must fail and drop the socket, not wedge under _send_lock."""
+        client = self.make_engine()
+        self.connect_client(client)
+        conn = client._conn
+
+        # select reporting no writability stands in for a peer that stopped reading
+        with (
+            patch("arduino.router_bridge.connection.select.select", return_value=([], [], [])),
+            self.assertRaises(ConnectionError),
+        ):
+            client._send_bytes(b"payload")
+
+        conn.send.assert_not_called()  # Never blocked on the wire
+        self.assertIsNone(client._conn)  # Dropped so _conn_manager reconnects and resyncs
 
     def test_cancel_request_sent_without_holding_callbacks_lock(self):
         """The timeout path must send $/cancelRequest outside callbacks_lock."""
@@ -238,13 +258,15 @@ class TestResourceLimits(UnitTest):
     def test_oversized_message_drops_the_connection(self):
         """A message exceeding max_message_size must drop the connection instead of exhausting memory."""
         client = self.make_engine(address="unix:///tmp/test.sock", max_message_size=32)
-        client._conn = MagicMock()
-        client._conn.recv.return_value = msgpack.packb([2, "m", ["x" * 100]])
+        conn = MagicMock()
+        client._conn = conn
+        conn.recv.return_value = msgpack.packb([2, "m", ["x" * 100]])
 
         client._read_loop()  # Must return so the connection manager reconnects with a fresh buffer
 
-        client._conn.recv.assert_called_once()  # No retry after the limit was hit
+        conn.recv.assert_called_once()  # No retry after the limit was hit
         self.assertIn("exceeds", str(self.mock_logger.error.call_args))
+        self.assertIsNone(client._conn)  # Oversized message drops the socket so the stream can resync
 
     def test_full_handler_queue_rejects_requests(self):
         """Requests arriving with a full handler queue must be rejected as busy, not queued unboundedly."""
