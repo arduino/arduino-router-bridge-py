@@ -4,10 +4,8 @@
 
 import logging
 
-from .connection import (
-    DEFAULT_ADDRESS,
-    Bridge,
-)
+from .bridge import Bridge
+from .transport import DEFAULT_ADDRESS
 
 __all__ = [
     "Bridge",

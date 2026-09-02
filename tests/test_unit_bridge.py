@@ -3,14 +3,22 @@
 # SPDX-License-Identifier: MPL-2.0
 
 import gc
-from unittest.mock import MagicMock
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
 
 from test_unit_common import UnitTest
 
 from arduino.router_bridge import Bridge
+from arduino.router_bridge.connection import _BridgeConnection
 
 
 class TestBridgeHandle(UnitTest):
+    @contextmanager
+    def idle_conn_manager(self):
+        """Replaces the connection manager loop with a plain wait, so no socket is ever touched."""
+        with patch.object(_BridgeConnection, "_conn_manager", lambda self: self._stop_event.wait()):
+            yield
+
     def test_public_api_delegates_to_connection(self):
         """The Bridge handle must delegate every public operation to its connection."""
         bridge = Bridge()
@@ -42,42 +50,43 @@ class TestBridgeHandle(UnitTest):
         """Each Bridge must own its own connection: no process-wide sharing."""
         first = Bridge()
         second = Bridge()
-        self.bridges.extend([first, second])
         self.assertIsNot(first._connection, second._connection)
 
     def test_context_manager_connects_and_disconnects(self):
         """The bridge can be used as a context manager."""
-        bridge = Bridge()
-        self.bridges.append(bridge)
+        with self.idle_conn_manager():
+            bridge = Bridge()
+            with bridge as entered:
+                self.assertIs(entered, bridge)
+                self.assertTrue(bridge._connection._read_thread.is_alive())
 
-        with bridge as entered:
-            self.assertIs(entered, bridge)
-            self.assertIsNotNone(bridge._connection._read_thread)
-
-        self.assertTrue(bridge._connection._stop_event.is_set())
+            self.assertTrue(bridge._connection._stop_event.is_set())
+            self.assertIsNone(bridge._connection._read_thread)
 
     def test_garbage_collected_bridge_stops_its_connection(self):
         """An abandoned bridge must disconnect automatically when garbage collected."""
-        bridge = Bridge()
-        bridge.connect()
-        connection = bridge._connection
+        with self.idle_conn_manager():
+            bridge = Bridge()
+            bridge.connect()
+            connection = bridge._connection
 
-        del bridge
-        gc.collect()
+            del bridge
+            gc.collect()
 
-        self.assertTrue(connection._stop_event.is_set())
+            self.assertTrue(connection._stop_event.is_set())
 
     def test_reconnect_after_disconnect(self):
         """connect() must work again after disconnect()."""
-        bridge = Bridge()
-        self.bridges.append(bridge)
+        with self.idle_conn_manager():
+            bridge = Bridge()
 
-        bridge.connect()
-        bridge.disconnect()
-        self.assertTrue(bridge._connection._stop_event.is_set())
+            bridge.connect()
+            bridge.disconnect()
+            self.assertTrue(bridge._connection._stop_event.is_set())
 
-        bridge.connect()
-        self.assertFalse(bridge._connection._stop_event.is_set())
+            bridge.connect()
+            self.assertFalse(bridge._connection._stop_event.is_set())
+            bridge.disconnect()
 
     def test_invalid_addresses_are_rejected(self):
         """The constructor must reject unsupported or incomplete addresses."""
@@ -93,12 +102,12 @@ class TestBridgeHandle(UnitTest):
 
     def test_unix_address_rejected_without_af_unix_support(self):
         """unix:// addresses must fail at construction on platforms lacking AF_UNIX (e.g. Windows)."""
-        del self.mock_socket.AF_UNIX
-        with self.assertRaises(ValueError):
-            Bridge("unix:///tmp/test.sock")
+        with patch("arduino.router_bridge.transport.socket") as mock_socket:
+            del mock_socket.AF_UNIX
+            with self.assertRaises(ValueError):
+                Bridge("unix:///tmp/test.sock")
 
     def test_address_property(self):
         """The bridge exposes the address it points to."""
         bridge = Bridge("tcp://somehost:4321")
-        self.bridges.append(bridge)
         self.assertEqual(bridge.address, "tcp://somehost:4321")

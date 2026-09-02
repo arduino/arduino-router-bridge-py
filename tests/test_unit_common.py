@@ -3,65 +3,56 @@
 # SPDX-License-Identifier: MPL-2.0
 
 import queue
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
-from arduino.router_bridge import DEFAULT_ADDRESS, Bridge
+from arduino.router_bridge.connection import _BridgeConnection
+from arduino.router_bridge.transport import DEFAULT_ADDRESS
 
 
 class UnitTest(unittest.TestCase):
+    """Base for unit tests: silences logging and builds connections without background threads."""
+
     def setUp(self):
-        """This method is called before each test to patch the connection dependencies."""
-        self.bridges = []  # Keeps handles alive so GC finalizers don't stop connections mid-test
-
-        # Patch dependencies
-        # Mock the logger used by the connection
+        """Patches every module logger with one shared mock so tests assert on log output in one place."""
         self.mock_logger = MagicMock()
-        self.logger_patcher = patch("arduino.router_bridge.connection.logger", self.mock_logger)
-        self.logger_patcher.start()
-
-        # Mock the socket instance that will be created
-        self.mock_socket_instance = MagicMock()
-        self.socket_patcher = patch("arduino.router_bridge.connection.socket")
-        self.mock_socket = self.socket_patcher.start()
-        self.mock_socket.socket.return_value = self.mock_socket_instance
-        self.mock_socket.create_connection.return_value = self.mock_socket_instance
-
-        # Mock only threading.Thread so the background loops never run.
-        self.mock_thread_instance = MagicMock()
-        self.thread_patcher = patch(
-            "arduino.router_bridge.connection.threading.Thread", return_value=self.mock_thread_instance
-        )
-        self.mock_thread = self.thread_patcher.start()
-
-    def tearDown(self):
-        """This method is called after each test and cleans up the patched dependencies."""
-        for bridge in self.bridges:
-            bridge.disconnect()
-        self.bridges.clear()
-
-        self.thread_patcher.stop()
-        self.socket_patcher.stop()
-        self.logger_patcher.stop()
+        for module in ("connection", "dispatch", "pending", "transport"):
+            patcher = patch(f"arduino.router_bridge.{module}.logger", self.mock_logger)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def make_connection(self, address=DEFAULT_ADDRESS, **kwargs):
-        """Creates a started connection, keeping its public handle alive for the test duration."""
-        bridge = Bridge(address, **kwargs)
-        bridge.connect()
-        self.bridges.append(bridge)
-        return bridge._connection
+        """Creates a connection without starting its background threads: tests drive it directly."""
+        return _BridgeConnection(address, **kwargs)
 
-    def connect_client(self, client):
-        """Drives the mocked connection sequence so the connection considers itself connected."""
-        client._connect()
-        self.assertTrue(client._is_connected_flag.is_set())
+    def connect_transport(self, client):
+        """Attaches a mock transport and marks the connection as established, standing in for _connect."""
+        transport = MagicMock()
+        client._transport = transport
+        client._is_connected_flag.set()
+        return transport
+
+    def mark_dispatch_thread(self, client):
+        """Marks the current thread as the dispatcher thread, standing in for handler context."""
+        client._dispatcher._thread = threading.current_thread()
 
     def drain_dispatch(self, client):
-        """Runs queued handler dispatches synchronously, standing in for the mocked dispatcher thread."""
+        """Runs queued handler dispatches synchronously, standing in for the dispatcher thread."""
+        dispatcher = client._dispatcher
         while True:
             try:
-                item = client._dispatch_queue.get_nowait()
+                item = dispatcher._queue.get_nowait()
             except queue.Empty:
                 return
             if item is not None:
-                client._run_handler(*item)
+                dispatcher._run_handler(*item)
+
+    def synchronous_threads(self):
+        """Patches connection-spawned threads to run their target inline, for deterministic tests."""
+
+        def run_inline(target=None, *args, **kwargs):
+            target()
+            return MagicMock()
+
+        return patch("arduino.router_bridge.connection.threading.Thread", side_effect=run_inline)
