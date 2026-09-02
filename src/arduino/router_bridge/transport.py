@@ -103,22 +103,6 @@ class Transport:
                 # select reported writability, so this send accepts at least one byte without blocking
                 sent += self._sock.send(view[sent:])
 
-    def is_alive(self) -> bool:
-        """Checks that the connection is usable without blocking or consuming buffered bytes."""
-        try:
-            readable, _, _ = select.select([self._sock], [], [], 0)
-            if not readable:
-                return True  # Socket is open and reading from it would block
-            # Peek without consuming buffered bytes; select guarantees this recv won't block
-            data = self._sock.recv(8, socket.MSG_PEEK)
-            return len(data) > 0
-        except ConnectionResetError as e:
-            logger.warning(f"Connection reset in connection loop: {e}")
-            return False  # Socket was closed for some other reason
-        except Exception as e:
-            logger.error(f"Unexpected error while checking socket status: {e}")
-            return False  # Assume the socket is broken for any other exception
-
     def close(self):
         """Shuts the connection down and releases the socket. Idempotent, never raises, and
         safe from any thread: shutdown wakes a recv()/send() blocked elsewhere.

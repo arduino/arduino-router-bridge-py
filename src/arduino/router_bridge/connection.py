@@ -199,20 +199,8 @@ class _BridgeConnection:
     def _connect(self):
         """Retries periodically until we have a clean connection. This method **must be** the only
         one allowed to set _is_connected_flag: that keeps the recv path lockless.
+        Always entered with no transport published: every path that ends a connection drops it.
         """
-        transport = self._transport
-        if transport is not None and transport.is_alive():
-            return
-
-        self._is_connected_flag.clear()
-
-        if transport is not None:
-            # Dirty state: we have a transport but it is not usable, drop it
-            with self._transport_lock:
-                if self._transport is transport:
-                    self._transport = None
-            transport.close()
-
         while not self._stop_event.is_set():
             try:
                 transport = Transport.connect(self._socket_type, self._peer_addr)

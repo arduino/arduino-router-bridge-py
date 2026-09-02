@@ -57,32 +57,6 @@ class TestReconnection(UnitTest):
         self.connect_with_mock_transport(client)
         client.call.assert_called_once_with("$/register", "early_handler")
 
-    def test_connect_reuses_a_healthy_transport(self):
-        """_connect must be a no-op when the current transport is still alive."""
-        client = self.make_connection()
-        transport = self.connect_transport(client)
-        transport.is_alive.return_value = True
-
-        client._connect()
-
-        self.assertIs(client._transport, transport)
-        transport.close.assert_not_called()
-
-    def test_connect_clears_connected_flag_before_cleanup(self):
-        """_connect must signal disconnection before tearing down a dirty transport,
-        so senders never see a set flag with a broken connection."""
-        client = self.make_connection()
-        dirty = self.connect_transport(client)
-        dirty.is_alive.return_value = False  # Broken while the flag is still set
-
-        flag_when_closed = []
-        dirty.close.side_effect = lambda: flag_when_closed.append(client._is_connected_flag.is_set())
-
-        client._stop_event.set()  # Skip the reconnect loop: only the cleanup is under test
-        client._connect()
-
-        self.assertEqual(flag_when_closed, [False])
-
     def test_connect_undoes_publication_when_stopped_concurrently(self):
         """stop() racing _connect must leave the connection torn down, not half-published."""
         client = self.make_connection()
