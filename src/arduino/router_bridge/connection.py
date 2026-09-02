@@ -20,6 +20,12 @@ DEFAULT_ADDRESS = "unix:///var/run/arduino-router.sock"
 _reconnect_delay = 3.0  # seconds
 _send_timeout = 15.0  # seconds; bounds a blocking send so a stalled peer cannot block the send path
 
+# TCP keepalive detects a half-open connection (peer vanished without FIN). SO_KEEPALIVE is portable;
+# the timers below are Linux-only and skipped elsewhere, where the OS default idle still applies.
+_keepalive_idle = 10  # seconds idle before the first probe
+_keepalive_interval = 5  # seconds between probes
+_keepalive_count = 3  # unanswered probes before the connection is considered dead
+
 # Error codes for RPC messages received from the RPC router. These are defined in the RPC router itself.
 ROUTE_ALREADY_EXISTS_ERR = 0x05
 BUFFER_LIMIT_EXCEEDED_ERR = 0x06
@@ -363,6 +369,7 @@ class _BridgeEngine:
                     host, port = self._peer_addr
                     conn = socket.create_connection((host, port), timeout=5)
                 conn.settimeout(None)  # Set blocking recv
+                self._configure_keepalive(conn)
                 with self._conn_lock:
                     self._conn = conn
                 self._is_connected_flag.set()
@@ -422,6 +429,33 @@ class _BridgeEngine:
         except Exception as e:
             logger.error(f"Unexpected error while checking socket status: {e}")
             return False  # Assume the socket is broken for any other exception
+
+    def _configure_keepalive(self, conn):
+        """Enables TCP keepalive so a half-open connection is detected instead of appearing healthy
+        forever. No-op for unix sockets. The timers are tuned on Linux; macOS and Windows are
+        development-only and keep the OS default idle, where the timer constants are absent.
+        """
+        if self.socket_type != "tcp":
+            return
+
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError as e:
+            logger.debug(f"Could not enable SO_KEEPALIVE: {e}")
+            return
+
+        for optname, value in (
+            ("TCP_KEEPIDLE", _keepalive_idle),
+            ("TCP_KEEPINTVL", _keepalive_interval),
+            ("TCP_KEEPCNT", _keepalive_count),
+        ):
+            opt = getattr(socket, optname, None)
+            if opt is None:
+                continue  # Linux-only knob; other platforms keep the OS default
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, opt, value)
+            except OSError as e:
+                logger.debug(f"Could not set {optname}: {e}")
 
     def _drop_connection(self, conn):
         """Forces the given connection down so _conn_manager reconnects and resyncs the stream.

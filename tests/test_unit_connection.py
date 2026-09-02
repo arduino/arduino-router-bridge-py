@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import msgpack
 from test_unit_common import UnitTest
 
-from arduino.router_bridge.connection import GENERIC_ERR
+from arduino.router_bridge.connection import GENERIC_ERR, _keepalive_idle
 
 
 class TestConnection(UnitTest):
@@ -333,3 +333,38 @@ class TestIsConnected(UnitTest):
         client._conn = MagicMock()
         with patch("arduino.router_bridge.connection.select.select", side_effect=OSError("Bad file descriptor")):
             self.assertFalse(client._is_connected())
+
+
+class TestKeepalive(UnitTest):
+    def _drop_socket_attrs(self, *names):
+        """Simulates a platform lacking the given socket constants."""
+        for name in names:
+            if hasattr(self.mock_socket, name):
+                delattr(self.mock_socket, name)
+
+    def test_tcp_enables_keepalive(self):
+        """A TCP connection must enable SO_KEEPALIVE so half-open peers are eventually detected."""
+        client = self.make_engine(address="tcp://localhost:1234")
+        self.connect_client(client)
+        client._conn.setsockopt.assert_any_call(self.mock_socket.SOL_SOCKET, self.mock_socket.SO_KEEPALIVE, 1)
+
+    def test_unix_skips_keepalive(self):
+        """Unix sockets are torn down by the kernel on peer exit, so keepalive must not be set."""
+        client = self.make_engine(address="unix:///tmp/test.sock")
+        self.connect_client(client)
+        client._conn.setsockopt.assert_not_called()
+
+    def test_linux_tunes_timers_via_setsockopt(self):
+        """On Linux (TCP_KEEPIDLE present) the idle/interval/count timers are set via setsockopt."""
+        client = self.make_engine(address="tcp://localhost:1234")
+        self.connect_client(client)
+        client._conn.setsockopt.assert_any_call(
+            self.mock_socket.IPPROTO_TCP, self.mock_socket.TCP_KEEPIDLE, _keepalive_idle
+        )
+
+    def test_missing_timer_knobs_are_skipped(self):
+        """On macOS/Windows (no Linux timer knobs) tuning is skipped but SO_KEEPALIVE is still set."""
+        self._drop_socket_attrs("TCP_KEEPIDLE", "TCP_KEEPINTVL", "TCP_KEEPCNT")
+        client = self.make_engine(address="tcp://localhost:1234")
+        self.connect_client(client)
+        client._conn.setsockopt.assert_called_once_with(self.mock_socket.SOL_SOCKET, self.mock_socket.SO_KEEPALIVE, 1)
