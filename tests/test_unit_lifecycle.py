@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import gc
 import os
 import socket
 import tempfile
@@ -10,7 +11,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from arduino.router_bridge import Bridge
-from arduino.router_bridge.connection import _BridgeEngine
+from arduino.router_bridge.connection import _BridgeConnection
 
 
 class TestLifecycle(unittest.TestCase):
@@ -61,8 +62,8 @@ class TestLifecycle(unittest.TestCase):
         bridge = Bridge(f"unix://{sock_path}")
         bridge.connect()
         self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
-        read_thread = bridge._engine._read_thread
-        dispatch_thread = bridge._engine._dispatch_thread
+        read_thread = bridge._connection._read_thread
+        dispatch_thread = bridge._connection._dispatch_thread
         self.assertTrue(read_thread.is_alive())
         self.assertTrue(dispatch_thread.is_alive())
 
@@ -70,13 +71,34 @@ class TestLifecycle(unittest.TestCase):
 
         self.assertFalse(read_thread.is_alive(), "Read thread leaked after disconnect()")
         self.assertFalse(dispatch_thread.is_alive(), "Dispatcher thread leaked after disconnect()")
-        self.assertIsNone(bridge._engine._read_thread)
+        self.assertIsNone(bridge._connection._read_thread)
+
+    def test_abandoned_handle_stops_connection_without_blocking(self):
+        """Dropping a handle must stop its connection via the non-blocking finalizer, not a join in GC."""
+        sock_path = self._start_dummy_server()
+
+        bridge = Bridge(f"unix://{sock_path}")
+        bridge.connect()
+        self.assertTrue(bridge.wait_connected(timeout=2), "Bridge did not connect")
+        connection = bridge._connection  # Outlives the handle so we can observe the wind-down
+        read_thread = connection._read_thread
+        dispatch_thread = connection._dispatch_thread
+
+        del bridge
+        gc.collect()  # Fires the finalizer; must not block on a thread join
+
+        # Daemon threads notice the stop event and wind down on their own
+        read_thread.join(timeout=2)
+        dispatch_thread.join(timeout=2)
+        self.assertFalse(read_thread.is_alive(), "Read thread leaked after handle was collected")
+        self.assertFalse(dispatch_thread.is_alive(), "Dispatcher thread leaked after handle was collected")
+        self.assertTrue(connection._stop_event.is_set())
 
     def test_disconnect_without_connect_is_safe(self):
         """disconnect() must be a safe no-op even if connect() was never called."""
         bridge = Bridge("unix:///tmp/never-exists.sock")
         bridge.disconnect()  # Must not raise or block
-        self.assertIsNone(bridge._engine._read_thread)
+        self.assertIsNone(bridge._connection._read_thread)
 
     def test_context_manager_connects_and_disconnects(self):
         """The bridge can be used as a context manager that connects on enter and disconnects on exit."""
@@ -84,28 +106,28 @@ class TestLifecycle(unittest.TestCase):
 
         # Avoid real connecting/looping
         with (
-            patch.object(_BridgeEngine, "_connect"),
-            patch.object(_BridgeEngine, "_conn_manager", lambda self: self._stop_event.wait()),
+            patch.object(_BridgeConnection, "_connect"),
+            patch.object(_BridgeConnection, "_conn_manager", lambda self: self._stop_event.wait()),
         ):
             with bridge as entered:
                 self.assertIs(entered, bridge)
-                self.assertTrue(bridge._engine._read_thread.is_alive())
+                self.assertTrue(bridge._connection._read_thread.is_alive())
 
-        self.assertTrue(bridge._engine._stop_event.is_set())
-        read_thread = bridge._engine._read_thread
+        self.assertTrue(bridge._connection._stop_event.is_set())
+        read_thread = bridge._connection._read_thread
         self.assertFalse(read_thread is not None and read_thread.is_alive())
 
     def test_connect_is_idempotent(self):
         """Calling connect() twice does not spawn a second set of background threads."""
         with (
-            patch.object(_BridgeEngine, "_connect"),
-            patch.object(_BridgeEngine, "_conn_manager", lambda self: self._stop_event.wait()),
+            patch.object(_BridgeConnection, "_connect"),
+            patch.object(_BridgeConnection, "_conn_manager", lambda self: self._stop_event.wait()),
         ):
             bridge = Bridge("unix:///tmp/never-exists.sock")
             bridge.connect()
-            first_thread = bridge._engine._read_thread
+            first_thread = bridge._connection._read_thread
             bridge.connect()  # idempotent
-            self.assertIs(bridge._engine._read_thread, first_thread)
+            self.assertIs(bridge._connection._read_thread, first_thread)
             bridge.disconnect()
 
     def test_reconnect_after_disconnect(self):

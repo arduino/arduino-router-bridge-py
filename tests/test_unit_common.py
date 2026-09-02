@@ -11,11 +11,11 @@ from arduino.router_bridge import DEFAULT_ADDRESS, Bridge
 
 class UnitTest(unittest.TestCase):
     def setUp(self):
-        """This method is called before each test to patch the engine dependencies."""
-        self.bridges = []  # Keeps handles alive so GC finalizers don't stop engines mid-test
+        """This method is called before each test to patch the connection dependencies."""
+        self.bridges = []  # Keeps handles alive so GC finalizers don't stop connections mid-test
 
         # Patch dependencies
-        # Mock the logger used by the engine
+        # Mock the logger used by the connection
         self.mock_logger = MagicMock()
         self.logger_patcher = patch("arduino.router_bridge.connection.logger", self.mock_logger)
         self.logger_patcher.start()
@@ -44,15 +44,15 @@ class UnitTest(unittest.TestCase):
         self.socket_patcher.stop()
         self.logger_patcher.stop()
 
-    def make_engine(self, address=DEFAULT_ADDRESS, **kwargs):
-        """Creates a started engine, keeping its public handle alive for the test duration."""
+    def make_connection(self, address=DEFAULT_ADDRESS, **kwargs):
+        """Creates a started connection, keeping its public handle alive for the test duration."""
         bridge = Bridge(address, **kwargs)
         bridge.connect()
         self.bridges.append(bridge)
-        return bridge._engine
+        return bridge._connection
 
     def connect_client(self, client):
-        """Drives the mocked connection sequence so the engine considers itself connected."""
+        """Drives the mocked connection sequence so the connection considers itself connected."""
         client._connect()
         self.assertTrue(client._is_connected_flag.is_set())
 
