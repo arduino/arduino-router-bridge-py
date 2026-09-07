@@ -5,11 +5,13 @@
 import logging
 
 from .bridge import Bridge
+from .protocol import RpcError
 from .transport import DEFAULT_ADDRESS
 
 __all__ = [
     "Bridge",
     "DEFAULT_ADDRESS",
+    "RpcError",
 ]
 
 # Library convention: emit nothing unless the application configures logging

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RpcError`, raised by `call()` when the peer answers with an error. It is a `ValueError`, as before, carrying the peer's error `code` and `message`, so callers can tell a missing method (router code 2, peer code 254) from other failures. The error codes are documented in the README.
+
 ### Changed
 
 - `provide()` fails when another client already provides the method, instead of silently treating the registration as successful while the handler never receives calls: the handler is dropped and `ValueError` raised, or the conflict logged as an error when the registration runs in the background.

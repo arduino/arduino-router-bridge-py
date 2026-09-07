@@ -116,7 +116,8 @@ class Bridge:
                 If None, waits indefinitely. Defaults to 10s.
 
         Raises:
-            ValueError: If the method does not exist or the call fails.
+            RpcError: If the peer answers with an error, e.g. the method does not exist. It is a
+                ValueError carrying the peer's error ``code`` and ``message``.
             TimeoutError: If the call takes more time than the specified timeout.
             ConnectionError: If the connection drops or is stopped while waiting.
             RuntimeError: If invoked from a provided handler (nested calls are not

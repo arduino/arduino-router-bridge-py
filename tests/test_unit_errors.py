@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from test_unit_common import UnitTest
 
+from arduino.router_bridge import RpcError
 from arduino.router_bridge.protocol import BUFFER_LIMIT_EXCEEDED_ERR, GENERIC_ERR
 
 
@@ -43,6 +44,8 @@ class TestErrors(UnitTest):
             client.call("test_error")
 
         self.assertIn("Something went wrong", str(cm.exception))
+        self.assertIsInstance(cm.exception, RpcError)
+        self.assertEqual((cm.exception.code, cm.exception.message), (GENERIC_ERR, "Something went wrong"))
 
     def test_buffer_limit_error_propagates(self):
         """A BUFFER_LIMIT_EXCEEDED_ERR response from the router is propagated to the caller."""
