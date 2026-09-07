@@ -7,6 +7,8 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
+import msgpack
+
 from arduino.router_bridge.connection import _BridgeConnection
 from arduino.router_bridge.transport import DEFAULT_ADDRESS
 
@@ -33,6 +35,15 @@ class UnitTest(unittest.TestCase):
         client._is_connected_flag.set()
         return transport
 
+    def answer_requests(self, client, error, result):
+        """Mocks _send_bytes so every sent request is answered with the given response."""
+
+        def side_effect(data, **kwargs):
+            request = msgpack.unpackb(data)
+            client._handle_msg([1, request[1], error, result])
+
+        client._send_bytes = MagicMock(side_effect=side_effect)
+
     def mark_dispatch_thread(self, client):
         """Marks the current thread as the dispatcher thread, standing in for handler context."""
         client._dispatcher._thread = threading.current_thread()
@@ -51,8 +62,8 @@ class UnitTest(unittest.TestCase):
     def synchronous_threads(self):
         """Patches connection-spawned threads to run their target inline, for deterministic tests."""
 
-        def run_inline(target=None, *args, **kwargs):
-            target()
+        def run_inline(target=None, args=(), **kwargs):
+            target(*args)
             return MagicMock()
 
         return patch("arduino.router_bridge.connection.threading.Thread", side_effect=run_inline)

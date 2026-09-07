@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `provide()` fails when another client already provides the method, instead of silently treating the registration as successful while the handler never receives calls: the handler is dropped and `ValueError` raised, or the conflict logged as an error when the registration runs in the background.
+- `unprovide()` no longer logs an error on routers predating `$/unregister`: the route stays bound to the bridge until disconnection, and the bridge answers its callers with a "method not found" error.
+
 ### Fixed
 
 - The send timeout is now actually enforced: a peer that stops reading made `notify()`, `call()` and handler responses block indefinitely, as a blocking socket send waits for the whole buffer to be queued. The timeout is now applied by the kernel (`SO_SNDTIMEO`), which also removes a system call from every write.

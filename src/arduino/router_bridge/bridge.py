@@ -133,7 +133,11 @@ class Bridge:
 
         Registration is declarative: the handler is recorded immediately, registered
         with the router as soon as a connection is available, and re-registered
-        transparently on every reconnection.
+        transparently on every reconnection. A method name belongs to one client: providing
+        one that another client already provides is a programming error, so the handler is
+        dropped and ValueError raised. When the registration runs later in the background,
+        because the bridge is not connected yet or ``provide`` is called from a handler, the
+        conflict is logged as an error instead.
 
         The handler may send notifications but must not call back into the bridge
         with ``call``: nested calls are rejected with a RuntimeError (see ``call``).
@@ -143,7 +147,7 @@ class Bridge:
             handler (callable): The function to call when the microcontroller requires it.
 
         Raises:
-            ValueError: If handler is not callable.
+            ValueError: If handler is not callable, or another client already provides the method.
 
         Examples:
             bridge.provide("get_country", get_country)

@@ -12,6 +12,7 @@ RESPONSE = 1
 NOTIFICATION = 2
 
 # Error codes for RPC messages received from the RPC router. These are defined in the RPC router itself.
+METHOD_NOT_AVAILABLE_ERR = 0x02
 ROUTE_ALREADY_EXISTS_ERR = 0x05
 BUFFER_LIMIT_EXCEEDED_ERR = 0x06
 
@@ -19,6 +20,18 @@ BUFFER_LIMIT_EXCEEDED_ERR = 0x06
 MALFORMED_CALL_ERR = 0xFD
 FUNCTION_NOT_FOUND_ERR = 0xFE
 GENERIC_ERR = 0xFF
+
+
+class RpcError(ValueError):
+    """Raised by ``call`` when the peer answers with an error; ``code`` and ``message`` carry the
+    peer's error, ``method_name`` the method that was called. A ValueError for backward compatibility.
+    """
+
+    def __init__(self, method_name: str, code: int, message: str):
+        super().__init__(f"Request '{method_name}' failed: {message} ({code})")
+        self.method_name = method_name
+        self.code = code
+        self.message = message
 
 
 def pack_request(msgid: int, method_name: str, params) -> bytes:
