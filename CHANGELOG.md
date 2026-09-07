@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The send timeout is now actually enforced: a peer that stops reading made `notify()`, `call()` and handler responses block indefinitely, as a blocking socket send waits for the whole buffer to be queued. The timeout is now applied by the kernel (`SO_SNDTIMEO`), which also removes a system call from every write.
+
 ## [0.4.0] - 2026-09-02
 
 ### Changed
