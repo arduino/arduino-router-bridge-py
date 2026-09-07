@@ -156,7 +156,9 @@ class Bridge:
         self._connection.provide(method_name, handler)
 
     def unprovide(self, method_name: str):
-        """Makes a method no more available to the microcontroller.
+        """Makes a method no more available to the microcontroller. Callers of the method
+        receive a "method not found" error from then on. Routers predating ``$/unregister``
+        keep the name bound to this bridge until it disconnects.
 
         Args:
             method_name (str): The name under which the function is already provided to the microcontroller.
