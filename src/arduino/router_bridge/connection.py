@@ -157,32 +157,29 @@ class _BridgeConnection:
     def provide(self, method_name: str, handler):
         """Records the handler and registers it with the router once connected, re-registering
         transparently on every reconnection. Raises ValueError if another client already provides
-        the method; when the registration runs in the background the conflict is logged instead.
+        the method; on a reconnection, where nobody is waiting, the conflict is logged instead.
         """
+        self._reject_on_dispatch_thread("provide", method_name)
         self._dispatcher.add(method_name, handler)
 
-        if not self._is_connected_flag.is_set():
-            return  # Registered on connection
-        if self._dispatcher.on_dispatch_thread():
-            self._run_in_background(self._register_or_log, method_name)
-        else:
-            self._register(method_name)
+        if self._is_connected_flag.is_set():
+            self._register(method_name)  # Otherwise registered on connection
 
     def unprovide(self, method_name: str):
         """Removes the handler and unregisters it from the router."""
+        self._reject_on_dispatch_thread("unprovide", method_name)
         if self._dispatcher.remove(method_name) is None:
             return  # Nothing to unregister
 
-        if not self._is_connected_flag.is_set():
-            return  # A new connection starts without it
-        if self._dispatcher.on_dispatch_thread():
-            self._run_in_background(self._unregister, method_name)
-        else:
-            self._unregister(method_name)
+        if self._is_connected_flag.is_set():
+            self._unregister(method_name)  # Otherwise a new connection simply starts without it
 
-    def _run_in_background(self, registration, method_name: str):
-        """Provided handlers must not block on calls, so their registrations run on a thread."""
-        threading.Thread(target=registration, args=(method_name,), name="Bridge.registration", daemon=True).start()
+    def _reject_on_dispatch_thread(self, operation: str, method_name: str):
+        """Registrations are calls, and handlers must not call: the peer may be blocked on the handler's response."""
+        if self._dispatcher.on_dispatch_thread():
+            raise RuntimeError(
+                f"Cannot {operation} '{method_name}' from a provided handler: registrations are not supported there."
+            )
 
     def _register(self, method_name: str):
         """Registers a method with the router. Two clients providing the same method is a
@@ -200,7 +197,7 @@ class _BridgeConnection:
                 raise ValueError(f"Method '{method_name}' is already provided by another client.") from e
 
     def _register_or_log(self, method_name: str):
-        """Registers from a background thread, where a conflict can only be reported in the log."""
+        """Registers from the connection thread, where a conflict can only be reported in the log."""
         try:
             self._register(method_name)
         except ValueError as e:

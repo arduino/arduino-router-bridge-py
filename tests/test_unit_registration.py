@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from test_unit_common import UnitTest
 
-from arduino.router_bridge.protocol import METHOD_NOT_AVAILABLE_ERR, ROUTE_ALREADY_EXISTS_ERR, RpcError
+from arduino.router_bridge.protocol import METHOD_NOT_AVAILABLE_ERR, ROUTE_ALREADY_EXISTS_ERR
 
 ROUTE_EXISTS = [ROUTE_ALREADY_EXISTS_ERR, "route already exists: dup"]
 NO_UNREGISTER = [METHOD_NOT_AVAILABLE_ERR, "method $/unregister not available"]
@@ -42,20 +42,6 @@ class TestRegistration(UnitTest):
         client._send_bytes.reset_mock()
         self.reconnect(client)
         client._send_bytes.assert_not_called()  # Never registered again
-
-    def test_conflict_from_a_handler_is_logged(self):
-        """From a handler the registration runs in the background, so the conflict can only be logged."""
-        client = self.make_connected()
-        # Inline threads would run on the marked dispatcher thread, where call() is rejected: stub the answer instead
-        client.call = MagicMock(side_effect=RpcError("$/register", *ROUTE_EXISTS))
-        self.mark_dispatch_thread(client)
-
-        with self.synchronous_threads():
-            client.provide("dup", lambda: "B")  # Must not raise on the dispatcher thread
-
-        self.mock_logger.error.assert_called_once()
-        self.assertIn("'dup'", self.mock_logger.error.call_args.args[0])
-        self.assertIsNone(client._dispatcher.lookup("dup"))
 
     def test_reproviding_an_owned_method_is_silent(self):
         """Replacing the handler of a method this connection already registered is not a conflict."""

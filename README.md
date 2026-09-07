@@ -45,9 +45,9 @@ def get_country(lon: str, lat: str) -> str:
 bridge.provide("get_country", get_country)
 ```
 
-A provided method can be withdrawn with `bridge.unprovide("get_country")`: from then on its callers receive a "method not found" error. A method name belongs to a single client: providing one that another client already provides is a programming error, so `provide()` drops the handler and raises `ValueError`. When the registration happens later in the background, because the bridge is not connected yet or `provide()` is called from a handler, the conflict is logged as an error instead. The name is released when its owner unprovides it or disconnects (routers predating `$/unregister` only release names on disconnection).
+A provided method can be withdrawn with `bridge.unprovide("get_country")`: from then on its callers receive a "method not found" error. A method name belongs to a single client: providing one that another client already provides is a programming error, so `provide()` drops the handler and raises `ValueError`. When the registration happens later in the background, because the bridge is not connected yet, the conflict is logged as an error instead. The name is released when its owner unprovides it or disconnects (routers predating `$/unregister` only release names on disconnection).
 
-Handlers can be provided before or after connecting: they are registered with the router as soon as the connection is available and re-registered transparently whenever it is re-established. Handlers run sequentially on a dedicated thread. A handler may send notifications, but must not call back into the bridge with `call()`: the peer may be blocked waiting for the handler's own response, so nested calls risk deadlocks and request loops and are rejected with a `RuntimeError`.
+Handlers can be provided before or after connecting: they are registered with the router as soon as the connection is available and re-registered transparently whenever it is re-established. Handlers run sequentially on a dedicated thread. A handler may send notifications, but must not call back into the bridge with `call()`, `provide()` or `unprovide()`: the peer may be blocked waiting for the handler's own response, so nested calls risk deadlocks and request loops and are rejected with a `RuntimeError`.
 
 ### Errors
 

@@ -260,20 +260,21 @@ class TestNestedCallGuard(UnitTest):
 
         client._send_response.assert_called_once_with(5, [GENERIC_ERR, "Unhandled RuntimeError in handler"], None)
 
-    def test_provide_from_dispatcher_thread_registers_in_background(self):
-        """provide() from a handler must not block on the registration call."""
+    def test_provide_and_unprovide_from_dispatcher_thread_are_rejected(self):
+        """Registrations are calls, so a handler cannot provide or unprovide."""
         client = self.make_connection()
         client.call = MagicMock()
         self.connect_transport(client)
+        client.provide("existing", lambda: None)
         self.mark_dispatch_thread(client)
 
-        with patch("arduino.router_bridge.connection.threading.Thread") as mock_thread:
+        with self.assertRaises(RuntimeError):
             client.provide("from_handler", lambda: None)
+        with self.assertRaises(RuntimeError):
+            client.unprovide("existing")
 
-        self.assertIsNotNone(client._dispatcher.lookup("from_handler"))
-        client.call.assert_not_called()  # Registration must not run inline on the dispatcher thread
-        _, thread_kwargs = mock_thread.call_args
-        self.assertEqual(thread_kwargs.get("name"), "Bridge.registration")
+        self.assertIsNone(client._dispatcher.lookup("from_handler"))
+        self.assertIsNotNone(client._dispatcher.lookup("existing"))  # Untouched
 
 
 class TestResourceLimits(UnitTest):
