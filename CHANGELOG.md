@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-08
+
 ### Added
 
 - `RpcError`, raised by `call()` when the peer answers with an error. It is a `ValueError`, as before, carrying the peer's error `code` and `message`, so callers can tell a missing method (router code 2, peer code 254) from other failures. The error codes are documented in the README.
@@ -109,7 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `arduino.router_bridge` logger namespace.
 - Type hints shipped with the package (`py.typed`).
 
-[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.1.0...v0.2.0
