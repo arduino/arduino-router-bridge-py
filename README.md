@@ -66,6 +66,8 @@ except RpcError as e:
 | ---- | ------ | ------- |
 | 1 | router | Invalid parameters to a `$/...` router method |
 | 2 | router | No client provides the method |
+| 3 | router | The request could not be forwarded to the client providing the method |
+| 4 | router | Any other router failure, e.g. unregistering a method this bridge does not provide |
 | 5 | router | The method is already provided by another client |
 | 6 | router | The message exceeds the size limit announced by the receiving peer |
 | 253 | peer | Wrong number or type of parameters for the handler |
