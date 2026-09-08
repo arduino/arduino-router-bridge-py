@@ -45,9 +45,34 @@ def get_country(lon: str, lat: str) -> str:
 bridge.provide("get_country", get_country)
 ```
 
-A provided method can be withdrawn with `bridge.unprovide("get_country")`.
+A provided method can be withdrawn with `bridge.unprovide("get_country")`: from then on its callers receive a "method not found" error. A method name belongs to a single client: providing one that another client already provides is a programming error, so `provide()` drops the handler and raises `ValueError`. When the registration happens later in the background, because the bridge is not connected yet, the conflict is logged as an error instead. The name is released when its owner unprovides it or disconnects (routers predating `$/unregister` only release names on disconnection).
 
-Handlers can be provided before or after connecting: they are registered with the router as soon as the connection is available and re-registered transparently whenever it is re-established. Handlers run sequentially on a dedicated thread. A handler may send notifications, but must not call back into the bridge with `call()`: the peer may be blocked waiting for the handler's own response, so nested calls risk deadlocks and request loops and are rejected with a `RuntimeError`.
+Handlers can be provided before or after connecting: they are registered with the router as soon as the connection is available and re-registered transparently whenever it is re-established. Handlers run sequentially on a dedicated thread. A handler may send notifications, but must not call back into the bridge with `call()`, `provide()` or `unprovide()`: the peer may be blocked waiting for the handler's own response, so nested calls risk deadlocks and request loops and are rejected with a `RuntimeError`.
+
+### Errors
+
+`call()` raises `TimeoutError` when the response does not arrive in time, `ConnectionError` when the connection drops or is stopped while waiting, and `RpcError` when the peer answers with an error. `RpcError` is a `ValueError` carrying the peer's error `code` and `message`; the code tells where the error comes from:
+
+```python
+from arduino.router_bridge import Bridge, RpcError
+
+try:
+    bridge.call("get_temperature", "sensor1")
+except RpcError as e:
+    print(e.code, e.message)
+```
+
+| Code | Origin | Meaning |
+| ---- | ------ | ------- |
+| 1 | router | Invalid parameters to a `$/...` router method |
+| 2 | router | No client provides the method |
+| 3 | router | The request could not be forwarded to the client providing the method |
+| 4 | router | Any other router failure, e.g. unregistering a method this bridge does not provide |
+| 5 | router | The method is already provided by another client |
+| 6 | router | The message exceeds the size limit announced by the receiving peer |
+| 253 | peer | Wrong number or type of parameters for the handler |
+| 254 | peer | The method is routed to the peer but it has no handler for it, e.g. after `unprovide()` |
+| 255 | peer | The handler failed |
 
 ## Configuration
 

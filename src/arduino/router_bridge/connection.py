@@ -39,6 +39,9 @@ class _BridgeConnection:
 
         self._pending = PendingCalls()
         self._dispatcher = Dispatcher(max_pending_handlers, self._send_response)
+        # Methods the router routes to this connection: tells a harmless re-registration from a conflict on
+        # routers that answer "route already exists" to both. Set operations are atomic, no lock needed
+        self._registered = set()
 
         self._transport = None
         self._transport_lock = threading.Lock()
@@ -138,7 +141,7 @@ class _BridgeConnection:
                 raise ConnectionError(f"Request '{method_name}' failed: {response}") from response
             else:
                 err_code, err_msg = response
-                raise ValueError(f"Request '{method_name}' failed: {err_msg} ({err_code})")
+                raise protocol.RpcError(method_name, err_code, err_msg)
         except queue.Empty:
             # Timed out waiting for response
             if self._pending.pop(msgid):
@@ -152,37 +155,65 @@ class _BridgeConnection:
             raise
 
     def provide(self, method_name: str, handler):
-        """Records the handler and registers it with the router once connected,
-        re-registering transparently on every reconnection.
+        """Records the handler and registers it with the router once connected, re-registering
+        transparently on every reconnection. Raises ValueError if another client already provides
+        the method; on a reconnection, where nobody is waiting, the conflict is logged instead.
         """
+        self._reject_on_dispatch_thread("provide", method_name)
         self._dispatcher.add(method_name, handler)
 
         if self._is_connected_flag.is_set():
-            self._register_with_router("$/register", method_name)
+            self._register(method_name)  # Otherwise registered on connection
 
     def unprovide(self, method_name: str):
         """Removes the handler and unregisters it from the router."""
+        self._reject_on_dispatch_thread("unprovide", method_name)
         if self._dispatcher.remove(method_name) is None:
             return  # Nothing to unregister
 
         if self._is_connected_flag.is_set():
-            self._register_with_router("$/unregister", method_name)
+            self._unregister(method_name)  # Otherwise a new connection simply starts without it
 
-    def _register_with_router(self, rpc_method: str, method_name: str):
-        """Sends a registration call, in a background thread when invoked from a provided
-        handler: handlers must not block on calls.
-        """
-
-        def do_call():
-            try:
-                self.call(rpc_method, method_name)
-            except Exception as e:
-                logger.error(f"Failed to send '{rpc_method}' for method '{method_name}': {e}")
-
+    def _reject_on_dispatch_thread(self, operation: str, method_name: str):
+        """Registrations are calls, and handlers must not call: the peer may be blocked on the handler's response."""
         if self._dispatcher.on_dispatch_thread():
-            threading.Thread(target=do_call, name="Bridge.registration", daemon=True).start()
-        else:
-            do_call()
+            raise RuntimeError(
+                f"Cannot {operation} '{method_name}' from a provided handler: registrations are not supported there."
+            )
+
+    def _register(self, method_name: str):
+        """Registers a method with the router. Two clients providing the same method is a
+        programming error: the handler is dropped, never to be registered again, and ValueError raised.
+        """
+        try:
+            self.call("$/register", method_name)
+            self._registered.add(method_name)
+        except Exception as e:
+            code = e.code if isinstance(e, protocol.RpcError) else None
+            if code != protocol.ROUTE_ALREADY_EXISTS_ERR:
+                logger.error(f"Failed to register method '{method_name}': {e}")
+            elif method_name not in self._registered:
+                self._dispatcher.remove(method_name)
+                raise ValueError(f"Method '{method_name}' is already provided by another client.") from e
+
+    def _register_or_log(self, method_name: str):
+        """Registers from the connection thread, where a conflict can only be reported in the log."""
+        try:
+            self._register(method_name)
+        except ValueError as e:
+            logger.error(str(e))
+
+    def _unregister(self, method_name: str):
+        """Unregisters a method from the router. A router predating $/unregister keeps routing the
+        name here until disconnection, and those requests are answered with a "method not found" error.
+        """
+        try:
+            self.call("$/unregister", method_name)
+            self._registered.discard(method_name)
+        except Exception as e:
+            code = e.code if isinstance(e, protocol.RpcError) else None
+            if code != protocol.METHOD_NOT_AVAILABLE_ERR:  # Routers predating $/unregister answer so: expected
+                logger.error(f"Failed to unregister method '{method_name}': {e}")
 
     def _conn_manager(self):
         """Alternates between connecting to the router and running the read loop, until stopped."""
@@ -209,6 +240,7 @@ class _BridgeConnection:
                 self._stop_event.wait(_reconnect_delay)
                 continue
 
+            self._registered.clear()  # A new connection starts unknown to the router
             with self._transport_lock:
                 self._transport = transport
             self._is_connected_flag.set()
@@ -234,10 +266,7 @@ class _BridgeConnection:
 
         def register():
             for method in methods:
-                try:
-                    self.call("$/register", method)
-                except Exception as e:
-                    logger.error(f"Failed to register method '{method}' after connection: {e}")
+                self._register_or_log(method)
 
         threading.Thread(target=register, name="Bridge.register_methods_on_connect", daemon=True).start()
 
@@ -333,10 +362,7 @@ class _BridgeConnection:
             return
 
         on_result, on_error = pending
-        if error is None:
-            on_result(result)
-        elif result is not None or error[0] == protocol.ROUTE_ALREADY_EXISTS_ERR:
-            # Treat ROUTE_ALREADY_EXISTS_ERR as OK: the router already knows the method, a recoverable situation.
+        if error is None or result is not None:
             on_result(result)
         else:
             on_error(error)

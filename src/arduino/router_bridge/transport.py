@@ -5,8 +5,9 @@
 """Socket layer: address parsing and the Transport wrapping one established connection."""
 
 import logging
-import select
 import socket
+import struct
+import sys
 import threading
 from urllib.parse import urlparse
 
@@ -53,6 +54,13 @@ def parse_address(address: str) -> tuple[str, str | tuple[str, int]]:
         )
 
 
+def _send_timeout_option() -> bytes:
+    """The SO_SNDTIMEO value for _send_timeout: a struct timeval on POSIX, milliseconds on Windows."""
+    if sys.platform == "win32":
+        return struct.pack("L", int(_send_timeout * 1000))
+    return struct.pack("ll", int(_send_timeout), int((_send_timeout % 1) * 1_000_000))
+
+
 class Transport:
     """One established socket connection to the router. The reconnect logic creates a fresh
     Transport per connection attempt, so "which connection is this?" is an identity question.
@@ -60,6 +68,9 @@ class Transport:
 
     def __init__(self, sock: socket.socket):
         self._sock = sock
+        # A blocking send waits until the whole buffer is queued, ignoring any userspace deadline. The kernel
+        # enforces this one: past it, send returns what it could queue or fails once nothing was queued at all
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, _send_timeout_option())
         self._send_lock = threading.Lock()  # Serializes socket writes
 
     @classmethod
@@ -94,14 +105,9 @@ class Transport:
         with self._send_lock:
             while sent < total:
                 try:
-                    _, writable, _ = select.select([], [self._sock], [], _send_timeout)
-                except ValueError:
-                    # select rejects the -1 fd of a socket closed concurrently: normalize to a socket error
-                    raise OSError("Socket closed during send") from None
-                if not writable:
-                    raise TimeoutError(f"Send stalled for {_send_timeout}s")
-                # select reported writability, so this send accepts at least one byte without blocking
-                sent += self._sock.send(view[sent:])
+                    sent += self._sock.send(view[sent:])
+                except BlockingIOError:
+                    raise TimeoutError(f"Send stalled for {_send_timeout}s") from None
 
     def close(self):
         """Shuts the connection down and releases the socket. Idempotent, never raises, and

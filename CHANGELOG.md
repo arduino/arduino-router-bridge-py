@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-08
+
+### Added
+
+- `RpcError`, raised by `call()` when the peer answers with an error. It is a `ValueError`, as before, carrying the peer's error `code` and `message`, so callers can tell a missing method (router code 2, peer code 254) from other failures. The error codes are documented in the README.
+
+### Changed
+
+- `provide()` fails when another client already provides the method, instead of silently treating the registration as successful while the handler never receives calls: the handler is dropped and `ValueError` raised, or the conflict logged as an error when the registration runs in the background.
+- `unprovide()` no longer logs an error on routers predating `$/unregister`: the route stays bound to the bridge until disconnection, and the bridge answers its callers with a "method not found" error.
+
+### Removed
+
+- `provide()` and `unprovide()` from inside a provided handler: registrations are calls, so they are now rejected with a `RuntimeError` like nested `call()`. The microcontroller library never supported them either.
+
+### Fixed
+
+- The send timeout is now actually enforced: a peer that stops reading made `notify()`, `call()` and handler responses block indefinitely, as a blocking socket send waits for the whole buffer to be queued. The timeout is now applied by the kernel (`SO_SNDTIMEO`), which also removes a system call from every write.
+
 ## [0.4.0] - 2026-09-02
 
 ### Changed
@@ -92,7 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `arduino.router_bridge` logger namespace.
 - Type hints shipped with the package (`py.typed`).
 
-[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arduino/arduino-router-bridge-py/compare/v0.1.0...v0.2.0

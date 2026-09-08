@@ -144,14 +144,16 @@ class TestHandleMsg(UnitTest):
         on_error.assert_called_once_with(error)
         self.assertIsNone(client._pending.pop(msgid))
 
-    def test_handle_msg_method_exists_error_response(self):
-        """A ROUTE_ALREADY_EXISTS_ERR response is treated as success: the router already knows the method."""
+    def test_handle_msg_route_exists_error_response(self):
+        """A ROUTE_ALREADY_EXISTS_ERR response is an error like any other: whether it is harmless is for
+        the registration to decide, as only it knows if this connection already owns the route.
+        """
         client = self.make_connection()
         on_result, on_error = MagicMock(), MagicMock()
         msgid = client._pending.register(on_result, on_error)
 
-        client._handle_msg([1, msgid, [ROUTE_ALREADY_EXISTS_ERR, "Method already exists"], None])
+        client._handle_msg([1, msgid, [ROUTE_ALREADY_EXISTS_ERR, "route already exists: m"], None])
 
-        on_result.assert_called_once_with(None)
-        on_error.assert_not_called()
+        on_error.assert_called_once_with([ROUTE_ALREADY_EXISTS_ERR, "route already exists: m"])
+        on_result.assert_not_called()
         self.assertIsNone(client._pending.pop(msgid))

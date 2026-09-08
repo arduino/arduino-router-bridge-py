@@ -4,6 +4,7 @@
 
 import socket
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -92,7 +93,8 @@ class TestConnect(TransportTest):
     def test_unix_skips_keepalive(self):
         """Unix sockets are torn down by the kernel on peer exit, so keepalive must not be set."""
         Transport.connect("unix", "/tmp/test.sock")
-        self.mock_sock.setsockopt.assert_not_called()
+        options_set = [call.args[1] for call in self.mock_sock.setsockopt.call_args_list]
+        self.assertNotIn(self.mock_socket.SO_KEEPALIVE, options_set)
 
 
 class TestKeepalive(TransportTest):
@@ -148,13 +150,13 @@ class TestSendAll(SocketPairTest):
         self.assertEqual(received, payload)
 
     def test_stalled_send_raises_timeout(self):
-        """A send that never becomes writable must fail instead of blocking forever."""
-        transport = Transport(MagicMock())
-        # select reporting no writability stands in for a peer that stopped reading
-        with patch("arduino.router_bridge.transport.select.select", return_value=([], [], [])):
+        """A peer that stops reading must make the send fail after the timeout instead of blocking forever."""
+        with patch("arduino.router_bridge.transport._send_timeout", 0.2):
+            transport, _ = self.make_pair()  # The peer never reads
+            started = time.monotonic()
             with self.assertRaises(TimeoutError):
-                transport.send_all(b"payload")
-        transport._sock.send.assert_not_called()  # Never blocked on the wire
+                transport.send_all(b"x" * 8_000_000)  # Far more than the socket buffers can hold
+        self.assertLess(time.monotonic() - started, 2, "send_all blocked well past the send timeout")
 
     def test_send_failure_raises_oserror(self):
         transport, peer = self.make_pair()

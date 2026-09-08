@@ -23,9 +23,9 @@ class Bridge:
 
     Provided handlers run sequentially, in arrival order, on a dedicated dispatcher
     thread; a slow handler delays the handlers queued after it. A handler may send
-    notifications, but must not call back into the bridge with ``call``: the peer may
-    be blocked waiting for the handler's own response, so nested calls risk deadlocks
-    and request loops and are rejected with a RuntimeError.
+    notifications, but must not call back into the bridge with ``call``, ``provide`` or
+    ``unprovide``: the peer may be blocked waiting for the handler's own response, so
+    nested calls risk deadlocks and request loops and are rejected with a RuntimeError.
 
     Examples:
         bridge = Bridge()
@@ -116,7 +116,8 @@ class Bridge:
                 If None, waits indefinitely. Defaults to 10s.
 
         Raises:
-            ValueError: If the method does not exist or the call fails.
+            RpcError: If the peer answers with an error, e.g. the method does not exist. It is a
+                ValueError carrying the peer's error ``code`` and ``message``.
             TimeoutError: If the call takes more time than the specified timeout.
             ConnectionError: If the connection drops or is stopped while waiting.
             RuntimeError: If invoked from a provided handler (nested calls are not
@@ -133,17 +134,21 @@ class Bridge:
 
         Registration is declarative: the handler is recorded immediately, registered
         with the router as soon as a connection is available, and re-registered
-        transparently on every reconnection.
+        transparently on every reconnection. A method name belongs to one client: providing
+        one that another client already provides is a programming error, so the handler is
+        dropped and ValueError raised. When the registration runs later in the background,
+        because the bridge is not connected yet, the conflict is logged as an error instead.
 
-        The handler may send notifications but must not call back into the bridge
-        with ``call``: nested calls are rejected with a RuntimeError (see ``call``).
+        The handler may send notifications but must not call back into the bridge with
+        ``call``, ``provide`` or ``unprovide``: nested calls are rejected with a RuntimeError.
 
         Args:
             method_name (str): The name under which the function should be provided to the microcontroller.
             handler (callable): The function to call when the microcontroller requires it.
 
         Raises:
-            ValueError: If handler is not callable.
+            ValueError: If handler is not callable, or another client already provides the method.
+            RuntimeError: If invoked from a provided handler.
 
         Examples:
             bridge.provide("get_country", get_country)
@@ -151,10 +156,15 @@ class Bridge:
         self._connection.provide(method_name, handler)
 
     def unprovide(self, method_name: str):
-        """Makes a method no more available to the microcontroller.
+        """Makes a method no more available to the microcontroller. Callers of the method
+        receive a "method not found" error from then on. Routers predating ``$/unregister``
+        keep the name bound to this bridge until it disconnects.
 
         Args:
             method_name (str): The name under which the function is already provided to the microcontroller.
+
+        Raises:
+            RuntimeError: If invoked from a provided handler.
 
         Examples:
             bridge.unprovide("get_country")
