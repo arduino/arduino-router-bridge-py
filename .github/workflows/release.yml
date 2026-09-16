@@ -19,12 +19,24 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
+
+      # The release PR is opened with GITHUB_TOKEN, whose events start no
+      # workflows, so the CI checks required to merge it would never run.
+      # Manual workflow dispatch allows to run CI explicitly.
+      - name: Run CI on the release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.release.outputs.pr }}
+        run: gh workflow run ci.yml --ref "$(jq -r .headBranchName <<<"$PR")"
 
   build:
     needs: release-please
