@@ -7,19 +7,11 @@
 # DO NOT EDIT MANUALLY. Your changes will be overwritten.
 # ------------------------------------------------------------------------------
 version: 2
-registries:
-  bcmi-labs-github-actions:
-    type: git
-    url: https://github.com
-    username: x-access-token
-    password: "${{secrets.ARDUINOBOT_TOKEN}}"
 
 updates:
   # Maintain dependencies for pip
   - package-ecosystem: "pip"
     directory: "/"
-    registries:
-      - bcmi-labs-github-actions
     schedule:
       interval: "weekly" # or "daily", "monthly"
     open-pull-requests-limit: 10
@@ -44,8 +36,6 @@ updates:
     exclude-paths:
       - ".github/workflows/security-pr.yml"
       - ".github/workflows/scheduled-security-scans.yml"
-    registries:
-      - bcmi-labs-github-actions
     schedule:
       interval: "weekly" # or "daily", "monthly"
     open-pull-requests-limit: 10
