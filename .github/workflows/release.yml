@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Keeps a release PR up to date from conventional commits; when that PR is
+  # merged, tags the commit and creates the GitHub release from the changelog
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+
+      # The release PR is opened with GITHUB_TOKEN, whose events start no
+      # workflows, so the CI checks required to merge it would never run.
+      # Manual workflow dispatch allows to run CI explicitly.
+      - name: Run CI on the release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.release.outputs.pr }}
+        run: gh workflow run ci.yml --ref "$(jq -r .headBranchName <<<"$PR")"
+
+  build:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Ensure tag matches project version
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match project.version $version"
+            exit 1
+          fi
+
+      - name: Build distributions
+        run: |
+          python -m pip install build
+          python -m build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed for PyPI trusted publishing (OIDC)
+      id-token: write
+    # The trusted publisher on PyPI is bound to this environment
+    environment:
+      name: pypi
+      url: https://pypi.org/p/arduino-router-bridge
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
