@@ -7,6 +7,13 @@ from [Conventional Commits](https://www.conventionalcommits.org/); earlier entri
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1](https://github.com/arduino/arduino-router-bridge-py/compare/v0.5.0...v0.5.1) (2026-10-02)
+
+
+### Fixed
+
+* type the parameters and returns of the public Bridge methods ([#27](https://github.com/arduino/arduino-router-bridge-py/issues/27)) ([45b12d5](https://github.com/arduino/arduino-router-bridge-py/commit/45b12d5cd4dfa8d4f175971b64363056b2d48a66))
+
 ## [0.5.0] - 2026-09-08
 
 ### Added
