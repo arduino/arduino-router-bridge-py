@@ -5,6 +5,8 @@
 """The public Bridge handle: a thin facade over the internal connection."""
 
 import weakref
+from collections.abc import Callable
+from typing import Any
 
 from .connection import _BridgeConnection
 from .transport import DEFAULT_ADDRESS
@@ -78,7 +80,7 @@ class Bridge:
         self._connection.start()
         return self._connection.wait_connected(timeout)
 
-    def disconnect(self):
+    def disconnect(self) -> None:
         """Closes the connection and releases resources. Idempotent and safe to call
         even if ``connect()`` was never called; ``connect()`` can be called again afterwards.
         """
@@ -91,7 +93,7 @@ class Bridge:
     def __exit__(self, exc_type, exc, tb):
         self.disconnect()
 
-    def notify(self, method_name: str, *params):
+    def notify(self, method_name: str, *params: Any) -> None:
         """Sends a notification to the microcontroller without waiting for a response.
         Best-effort: never blocks waiting for a connection, the notification is
         dropped if the router is not connected.
@@ -105,7 +107,7 @@ class Bridge:
         """
         self._connection.notify(method_name, *params)
 
-    def call(self, method_name: str, *params, timeout: float | None = 10):
+    def call(self, method_name: str, *params: Any, timeout: float | None = 10) -> Any:
         """Calls a method on the microcontroller and waits for a response.
         Raises an exception if the call fails or times out.
 
@@ -128,7 +130,7 @@ class Bridge:
         """
         return self._connection.call(method_name, *params, timeout=timeout)
 
-    def provide(self, method_name: str, handler):
+    def provide(self, method_name: str, handler: Callable[..., Any]) -> None:
         """Makes a method available to the microcontroller, so it can call it remotely.
         The handler should be a callable that can take arguments.
 
@@ -155,7 +157,7 @@ class Bridge:
         """
         self._connection.provide(method_name, handler)
 
-    def unprovide(self, method_name: str):
+    def unprovide(self, method_name: str) -> None:
         """Makes a method no more available to the microcontroller. Callers of the method
         receive a "method not found" error from then on. Routers predating ``$/unregister``
         keep the name bound to this bridge until it disconnects.
