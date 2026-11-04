@@ -180,6 +180,48 @@ class TestLockDiscipline(UnitTest):
         self.assertIsNone(client._transport)  # Dropped so _conn_manager reconnects and resyncs
         transport.close.assert_called_once()
 
+    def test_send_stall_is_reported_once(self):
+        """Dropping the connection discards queued traffic: it must be logged as a warning, once per drop."""
+        client = self.make_connection()
+        transport = self.connect_transport(client)
+        transport.send_all.side_effect = TimeoutError("Send stalled for 15.0s")
+
+        for _ in range(2):  # A second sender failing on the same transport finds it already dropped
+            with self.assertRaises(ConnectionError):
+                client._send_bytes(b"payload", wait_for_connection=False)
+
+        self.mock_logger.warning.assert_called_once()
+        self.assertIn("Send stalled for 15.0s", self.mock_logger.warning.call_args[0][0])
+
+    def test_notify_logs_the_drop_reason(self):
+        """A notification lost to a send failure is not reported as a disconnection."""
+        client = self.make_connection()
+        transport = self.connect_transport(client)
+        transport.send_all.side_effect = TimeoutError("Send stalled for 15.0s")
+
+        client.notify("set_led", True)
+
+        self.mock_logger.debug.assert_called_once()
+        self.assertIn("Send stalled for 15.0s", self.mock_logger.debug.call_args[0][0])
+
+    def test_read_loop_attributes_eof_to_the_router_only_when_it_closed(self):
+        """EOF after our own drop (a send stall, stop()) must not be logged as a closure by the router."""
+        client = self.make_connection()
+        transport = self.connect_transport(client)
+        transport.recv.side_effect = lambda n: client._drop_transport(transport) and b""  # EOF after our close()
+
+        client._read_loop()
+
+        self.mock_logger.info.assert_not_called()
+
+        client = self.make_connection()
+        transport = self.connect_transport(client)
+        transport.recv.return_value = b""  # Orderly shutdown by the router
+
+        client._read_loop()
+
+        self.mock_logger.info.assert_called_once_with("Connection closed by router")
+
     def test_cancel_request_sent_without_holding_pending_lock(self):
         """The timeout path must send $/cancelRequest outside the pending-calls lock."""
         client = self.make_connection()

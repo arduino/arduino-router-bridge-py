@@ -100,8 +100,8 @@ class _BridgeConnection:
         """Sends a notification, best-effort: never waits for a connection, dropped if disconnected."""
         try:
             self._send_bytes(protocol.pack_notification(method_name, params), wait_for_connection=False)
-        except ConnectionError:
-            logger.debug(f"Dropped notification for method '{method_name}': not connected.")
+        except ConnectionError as e:
+            logger.debug(f"Dropped notification for method '{method_name}': {e}")
         except Exception as e:
             logger.error(f"Failed to send notification for method '{method_name}': {e}")
 
@@ -270,16 +270,18 @@ class _BridgeConnection:
 
         threading.Thread(target=register, name="Bridge.register_methods_on_connect", daemon=True).start()
 
-    def _drop_transport(self, transport):
+    def _drop_transport(self, transport) -> bool:
         """Forces the given transport down so _conn_manager reconnects and resyncs the stream.
-        Safe from any thread; a no-op once the transport has been replaced.
+        Safe from any thread; a no-op once the transport has been replaced. Returns True when
+        this call took the transport down, so the caller can report the drop exactly once.
         """
         self._is_connected_flag.clear()
         with self._transport_lock:
             if transport is None or self._transport is not transport:
-                return  # Already replaced by a newer transport or dropped
+                return False  # Already replaced by a newer transport or dropped
             self._transport = None
         transport.close()
+        return True
 
     def _read_loop(self):
         """Reads and processes messages until the connection is lost or stop is requested;
@@ -294,7 +296,11 @@ class _BridgeConnection:
                 try:
                     data = transport.recv(4096)
                     if not data:
-                        logger.info("Connection closed by router")
+                        # EOF also follows our own close(): only a still-published transport was closed by the peer
+                        with self._transport_lock:
+                            closed_by_router = self._transport is transport
+                        if closed_by_router:
+                            logger.info("Connection closed by router")
                         break
                     unpacker.feed(data)
                     for msg in unpacker:
@@ -394,6 +400,12 @@ class _BridgeConnection:
         try:
             transport.send_all(packed_data)
         except OSError as e:
-            # A stalled or partial send leaves the stream desynced: drop the transport so it resyncs.
-            self._drop_transport(transport)
+            # A stalled or partial send leaves the stream desynced: drop the transport so it resyncs. A send
+            # stalls when the peer stops reading, e.g. the microcontroller is busy and the router is throttled
+            # by it: the stream is then still healthy but we cannot tell that from a dead peer, so report it
+            if self._drop_transport(transport):
+                logger.warning(
+                    f"Send failed ({e}): dropping the connection to resync, pending calls fail and "
+                    "notifications are discarded until reconnected"
+                )
             raise ConnectionError(f"Send failed due to socket error: {e}")
