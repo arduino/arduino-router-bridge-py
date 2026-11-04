@@ -7,6 +7,13 @@ from [Conventional Commits](https://www.conventionalcommits.org/); earlier entri
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2](https://github.com/arduino/arduino-router-bridge-py/compare/v0.5.1...v0.5.2) (2026-11-04)
+
+
+### Fixed
+
+* warn when a stalled send drops the connection ([#36](https://github.com/arduino/arduino-router-bridge-py/issues/36)) ([a2b3ed7](https://github.com/arduino/arduino-router-bridge-py/commit/a2b3ed7637fde205b99333c5fa97eb4957b8570d))
+
 ## [0.5.1](https://github.com/arduino/arduino-router-bridge-py/compare/v0.5.0...v0.5.1) (2026-10-02)
 
 
